@@ -5,20 +5,22 @@
 //! with nearest-neighbor filtering) land in M4.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use iced::mouse;
 use iced::widget::canvas::{self, Path, Stroke, Text};
-use iced::{Color, Point, Rectangle, Renderer, Theme};
+use iced::{Color, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::Message;
 use crate::domain::{Agent, AgentId, AgentStatus, RoomId, room_for};
-use crate::scene::RoomLayout;
+use crate::scene::{RoomLayout, ThoughtBubble};
 use crate::ui::theme;
 
 /// Snapshot of what to draw. Cheap to clone; recreated each `view()`.
 pub struct OfficeScene<'a> {
     pub roster: &'a [Agent],
     pub statuses: &'a HashMap<AgentId, AgentStatus>,
+    pub bubbles: &'a [ThoughtBubble],
     pub cache: &'a canvas::Cache,
 }
 
@@ -60,11 +62,24 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                 per_room.entry(room).or_default().push(agent);
             }
 
+            let mut sprite_positions: HashMap<AgentId, Point> = HashMap::new();
             for (room, agents) in per_room {
                 for (idx, agent) in agents.iter().enumerate() {
                     let pos = layout.sprite_slot(room, idx);
                     draw_sprite(frame, pos, agent);
+                    sprite_positions.insert(agent.id.clone(), pos);
                 }
+            }
+
+            let now = Instant::now();
+            for bubble in self.bubbles {
+                let Some(alpha) = bubble.alpha(now) else {
+                    continue;
+                };
+                let Some(anchor) = sprite_positions.get(&bubble.agent).copied() else {
+                    continue;
+                };
+                draw_bubble(frame, anchor, bubble.text, alpha);
             }
         });
 
@@ -91,6 +106,45 @@ fn draw_room(frame: &mut canvas::Frame, layout: &RoomLayout, room: RoomId) {
         position: Point::new(rect.x + 12.0, rect.y + 10.0),
         color: *theme::TERMINAL_GREEN,
         size: 13.0.into(),
+        font: iced::Font::MONOSPACE,
+        ..Text::default()
+    });
+}
+
+fn draw_bubble(frame: &mut canvas::Frame, anchor: Point, text: &str, alpha: f32) {
+    // Approximate width for monospace at 11pt.
+    let width = (text.len() as f32 * 6.5).max(40.0) + 12.0;
+    let height = 20.0;
+    let bubble_origin = Point::new(anchor.x - width / 2.0, anchor.y - 42.0);
+
+    let fill = Color {
+        a: alpha * 0.95,
+        ..(*theme::SURFACE_3)
+    };
+    let border = Color {
+        a: alpha * 0.9,
+        ..(*theme::TERMINAL_GREEN)
+    };
+    let text_col = Color {
+        a: alpha,
+        ..(*theme::TERMINAL_GREEN)
+    };
+
+    let rect = Path::rectangle(bubble_origin, Size::new(width, height));
+    frame.fill(&rect, fill);
+    frame.stroke(&rect, Stroke::default().with_color(border).with_width(1.0));
+
+    // Little tail pointing down to the sprite.
+    let tail_top = Point::new(anchor.x, bubble_origin.y + height);
+    let tail_bottom = Point::new(anchor.x, bubble_origin.y + height + 6.0);
+    let tail = Path::line(tail_top, tail_bottom);
+    frame.stroke(&tail, Stroke::default().with_color(border).with_width(2.0));
+
+    frame.fill_text(Text {
+        content: text.to_string(),
+        position: Point::new(bubble_origin.x + 6.0, bubble_origin.y + 4.0),
+        color: text_col,
+        size: 11.0.into(),
         font: iced::Font::MONOSPACE,
         ..Text::default()
     });
