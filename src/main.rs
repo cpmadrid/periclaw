@@ -1,4 +1,7 @@
 mod app;
+mod domain;
+mod net;
+mod scene;
 mod ui;
 
 pub use app::Message;
@@ -16,6 +19,7 @@ fn main() -> iced::Result {
     iced::application(app::App::default, app::App::update, app::App::view)
         .title("Mission Control")
         .theme(app::App::theme)
+        .subscription(app::App::subscription)
         .window_size((1280.0, 800.0))
         .run()
 }

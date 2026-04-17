@@ -2108,6 +2108,9 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "palette",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
