@@ -21,7 +21,11 @@ use serde::Deserialize;
 const KEYRING_SERVICE: &str = "com.sassydog.mission-control-desktop";
 const KEYRING_USER: &str = "openclaw-gateway-token";
 
-pub const GATEWAY_URL: &str = "ws://100.87.202.125:18789/__openclaw__/ws";
+// NOT `/__openclaw__/ws` — that's the CANVAS WS path, which intercepts
+// WS upgrades first and runs a different protocol. Gateway WS lives at
+// root, falling through after canvas declines. Verified against
+// openclaw/src/gateway/client.ts default `ws://127.0.0.1:18789`.
+pub const GATEWAY_URL: &str = "ws://100.87.202.125:18789/";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

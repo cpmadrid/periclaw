@@ -1,24 +1,30 @@
 //! Real WebSocket client for the OpenClaw gateway on ubu-3xdv.
 //!
-//! **Status (M3): scaffolded, handshake not yet landing.**
-//! All the plumbing is in place — auth header, Authorization token,
-//! frame format, connect.challenge listener, hello-ok matcher, poll
-//! loop, exponential-backoff reconnect — but the session currently
-//! times out waiting for the server's `connect.challenge` event, for
-//! reasons not yet isolated. Running without `OPENCLAW_MOCK=1` leaves
-//! the sprites unknown-status in the Agent Office; the app stays up
-//! and keeps retrying. Fully wiring this is a follow-up spike.
+//! **Status (M3.2): handshake cracked, scoped methods need pairing.**
+//! Connects, receives `connect.challenge`, sends `connect`, receives
+//! `hello-ok`. Scope-free methods (`health`) work. Scoped methods
+//! (`cron.status`, `channels.status`, etc.) return
+//! `INVALID_REQUEST: missing scope: operator.read` because bearer-
+//! token auth without device pairing gets no operator scopes (see
+//! `openclaw/src/gateway/server/ws-connection/connect-policy.ts`
+//! `shouldClearUnboundScopesForMissingDeviceIdentity`). The follow-up
+//! (M3.3) is either a device-pair handshake or a config flip like
+//! `controlUi.dangerouslyDisableDeviceAuth`.
 //!
-//! Protocol (from openclaw/docs/gateway/protocol.md and the local
-//! npm bundle's client reference implementation):
+//! Until then, real data comes from `net::openclaw_ssh` which reads
+//! the gateway's state files directly.
 //!
-//! 1. WS upgrade to `ws://100.87.202.125:18789/__openclaw__/ws` with
-//!    `Authorization: Bearer <token>` header.
-//! 2. Wait for server-initiated
-//!    `{type:"event", event:"connect.challenge", payload:{nonce}}`.
-//!    The server sends this once the connection is accepted; clients
-//!    must NOT send `connect` until they've seen it (verified in
-//!    `dist/client-*.js` — `sendConnect` gates on `this.connectNonce`).
+//! Protocol (verified against openclaw source in
+//! openclaw/src/gateway/server/ws-connection.ts and
+//! openclaw/src/gateway/client.ts):
+//!
+//! 1. WS upgrade to `ws://host:port/` — **root path**. NOT
+//!    `/__openclaw__/ws`, which is reserved for the canvas-host
+//!    server and intercepts WS upgrades first. `Authorization: Bearer
+//!    <token>` header is required.
+//! 2. Server sends `{type:"event", event:"connect.challenge",
+//!    payload:{nonce}}` unconditionally on accepted connections. Must
+//!    be received before sending `connect`.
 //! 3. Client sends
 //!    `{type:"req", id, method:"connect", params:{minProtocol:3,
 //!    maxProtocol:3, client:{id, version, platform, mode}, role,
@@ -26,10 +32,9 @@
 //!    token-only auth.
 //! 4. Server replies
 //!    `{type:"res", id, ok:true, payload:{type:"hello-ok", server,
-//!    features, snapshot, policy, auth}}` — note `hello-ok` is the
-//!    payload type nested under the standard `res` envelope.
-//! 5. After hello-ok, poll `cron.status` + `channels.status` with the
-//!    same envelope.
+//!    features, snapshot, policy, auth}}`.
+//! 5. After hello-ok, RPCs use the same envelope. Scope-free methods
+//!    work; scoped methods need device pairing.
 //!
 //! On any failure the session errors, emits `WsEvent::Disconnected`,
 //! sleeps with exponential backoff capped at 30s, and retries.
@@ -198,7 +203,7 @@ async fn session(
                 "instanceId": instance_id,
             },
             "role": "operator",
-            "scopes": [],
+            "scopes": ["operator.admin"],
             "caps": [],
             "auth": { "token": token }
         }
