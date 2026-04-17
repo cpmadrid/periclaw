@@ -62,16 +62,19 @@ struct ChannelEntry {
 #[derive(Debug, Deserialize)]
 struct AgentsBlock {
     #[serde(default)]
-    list: Vec<AgentRecord>,
-    #[serde(default, rename = "default")]
-    default_id: Option<String>,
+    defaults: Option<AgentDefaults>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AgentRecord {
-    id: String,
+struct AgentDefaults {
     #[serde(default)]
-    model: Option<String>,
+    model: Option<ModelDefaults>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelDefaults {
+    #[serde(default)]
+    primary: Option<String>,
 }
 
 /// Check env for the SSH target host. Returns `None` if SSH mode isn't requested.
@@ -159,18 +162,18 @@ async fn poll_config(host: &str) -> Result<(Vec<Channel>, Option<MainAgent>), Po
         })
         .unwrap_or_default();
 
-    let main = parsed.agents.and_then(|a| {
-        let picked = a
-            .list
-            .iter()
-            .find(|r| Some(&r.id) == a.default_id.as_ref())
-            .or_else(|| a.list.first())?;
-        Some(MainAgent {
-            id: picked.id.clone(),
-            model: picked.model.clone(),
+    // Config's agents block is `agents.defaults.model.primary` (a string).
+    // We hardcode id="main" since that's the canonical agent across the setup.
+    let main = parsed
+        .agents
+        .and_then(|a| a.defaults)
+        .and_then(|d| d.model)
+        .and_then(|m| m.primary)
+        .map(|model| MainAgent {
+            id: "main".to_string(),
+            model: Some(model),
             state: Some("idle".into()),
-        })
-    });
+        });
 
     Ok((channels, main))
 }
@@ -249,8 +252,12 @@ mod tests {
                 "whatsapp": { "enabled": false }
             },
             "agents": {
-                "list": [{ "id": "main", "model": "openai-codex/gpt-5.4" }],
-                "default": "main"
+                "defaults": {
+                    "model": {
+                        "primary": "openai-codex/gpt-5.4",
+                        "fallbacks": ["vllm/qwen3-14b"]
+                    }
+                }
             }
         }
         "#;
@@ -259,10 +266,10 @@ mod tests {
         assert!(providers.get("slack").unwrap().enabled);
         assert!(!providers.get("whatsapp").unwrap().enabled);
         let agents = cfg.agents.unwrap();
-        assert_eq!(agents.default_id.as_deref(), Some("main"));
-        assert_eq!(
-            agents.list[0].model.as_deref(),
-            Some("openai-codex/gpt-5.4")
-        );
+        let primary = agents
+            .defaults
+            .and_then(|d| d.model)
+            .and_then(|m| m.primary);
+        assert_eq!(primary.as_deref(), Some("openai-codex/gpt-5.4"));
     }
 }
