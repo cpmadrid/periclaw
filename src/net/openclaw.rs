@@ -123,6 +123,13 @@ async fn session(
     let auth_header = HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|e| SessionError::Send(e.to_string()))?;
     req.headers_mut().insert("Authorization", auth_header);
+    // Gateway enforces `controlUi.allowedOrigins` on WS upgrade. Use
+    // one of the configured origins — `http://192.168.1.2:18789` is
+    // the dashboard URL the Control UI itself uses.
+    req.headers_mut().insert(
+        "Origin",
+        HeaderValue::from_static("http://192.168.1.2:18789"),
+    );
     let (mut socket, _resp) = connect_async(req).await?;
 
     // Step 1: wait for the server-initiated `connect.challenge` event before
