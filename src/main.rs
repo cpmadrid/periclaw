@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod domain;
 mod net;
 mod scene;

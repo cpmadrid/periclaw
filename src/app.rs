@@ -6,10 +6,7 @@ use iced::widget::{Canvas, canvas, center, column, container, row, text};
 use iced::{Element, Length, Padding, Subscription};
 
 use crate::domain::{Agent, AgentId, AgentStatus, agent};
-use crate::net::{
-    WsEvent, events,
-    mock::{self},
-};
+use crate::net::{WsEvent, events, mock, openclaw};
 use crate::scene::OfficeScene;
 use crate::ui::{sidebar, theme};
 
@@ -164,10 +161,7 @@ impl App {
         if mock::enabled() {
             Subscription::run(mock::connect).map(Message::Ws)
         } else {
-            // Real WS connector lands in M3. Emit nothing for now so
-            // the app still renders the empty office when run without
-            // OPENCLAW_MOCK=1 and without a gateway.
-            Subscription::none()
+            Subscription::run(openclaw::connect).map(Message::Ws)
         }
     }
 
