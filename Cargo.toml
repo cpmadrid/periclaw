@@ -1,0 +1,21 @@
+[package]
+name = "mission-control-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Pixel-art Agent Office desktop visualization of OpenClaw AI agents"
+
+[[bin]]
+name = "sassy-mc"
+path = "src/main.rs"
+
+[dependencies]
+iced = { version = "0.14", features = ["canvas", "image", "tokio", "advanced"] }
+palette = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
