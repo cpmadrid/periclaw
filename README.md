@@ -13,45 +13,46 @@ Native Rust desktop companion to Mission Control — a pixel-art visualization o
 
 ## Run
 
-From this directory:
+Matches the house `./dev` pattern used across Sassy Dog (lupita, velovate, tailoredtip, quickshot). Everything activity-first, colored output, cargo underneath.
 
 ```bash
-just dev        # RUST_LOG=sassy_mc=debug cargo run
-just mock       # OPENCLAW_MOCK=1 cargo run (no WS to ubu-3xdv)
-just check      # cargo check --all-targets
-just fmt        # cargo fmt
-just clippy     # cargo clippy --all-targets -- -D warnings
+./dev run                        # auto mode (uses env vars as-is), debug build
+./dev run --mode mock            # scripted fixture (offline demo)
+./dev run --mode ssh             # real data via ssh workstation
+./dev run --mode ssh --ssh-host ubu-3xdv
+./dev run --release              # release-optimized
+./dev build --release            # stripped release binary at target/release/sassy-mc
+./dev test                       # cargo test
+./dev lint                       # cargo clippy -- -D warnings
+./dev fmt                        # cargo fmt (--check for dry-run)
+./dev ci                         # full CI pipeline locally (fmt + clippy + test + release build)
+./dev cross-arm64                # build for ubu-3xdv (aarch64-linux-gnu)
+./dev version                    # app version, build number, git sha
+./dev help                       # usage
 ```
 
-Or directly:
+Activity implementations are thin scripts under `Scripts/`. `Scripts/lib.sh` + `Scripts/config.sh` mirror Lupita's pattern so new contributors coming from another Sassy Dog app land in familiar ground.
 
-```bash
-cargo run
-```
+### Data source modes
 
-### Real data from ubu-3xdv
+Three paths to OpenClaw state, selected via `./dev run --mode`:
 
-The native WS handshake against OpenClaw's gateway (`net::openclaw`) isn't fully working yet. The working path for v1 is SSH+file-reader:
+| Mode | Env var set | Data source | Use case |
+|---|---|---|---|
+| `mock` | `OPENCLAW_MOCK=1` | `assets/test/scenario_happy.json` | Offline demo, UI iteration |
+| `ssh` | `OPENCLAW_SSH_HOST=workstation` | `ssh <host> cat ~/.openclaw/cron/jobs.json` every 7s, plus `openclaw.json` every 30s | **Current real-data path.** Sub-400ms per poll over Tailscale. Channel state is optimistic (enabled == connected). |
+| `ws` | (neither) | Native WebSocket handshake to `ws://host:port/` | Handshake works; scoped methods need device pairing (M3.3). Currently only `health` succeeds. |
 
-```bash
-OPENCLAW_SSH_HOST=workstation cargo run
-```
-
-This reads `~/.openclaw/cron/jobs.json` and `~/.openclaw/openclaw.json` via `ssh <host> cat <path>` — sub-400ms per poll over Tailscale. Cron state is live; channel status is optimistic (enabled == connected) since real connection state requires the WS channel we haven't unlocked yet.
-
-Mode selector in `app::App::subscription`:
-- `OPENCLAW_MOCK=1` → scripted fixture stream (offline demo)
-- `OPENCLAW_SSH_HOST=<target>` → SSH file reader (real data)
-- Neither → native WS attempt (currently times out; tracks in M3.2)
+The selector lives in `app::App::subscription`.
 
 ## Build for release
 
 ```bash
-just build-release          # macOS (local target)
-just build-arm64            # ubu-3xdv (aarch64-unknown-linux-gnu, needs `cross`)
+./dev build --release      # macOS (local target) — target/release/sassy-mc
+./dev cross-arm64          # ubu-3xdv (aarch64-unknown-linux-gnu, uses cross if available)
 ```
 
-Release binary: `target/release/sassy-mc`.
+The release build strips debug symbols automatically. Build numbers come from `Scripts/get-build-number.sh` (git commit count, overridable with `BUILD_NUMBER` env var) so CI and local stay aligned.
 
 ## Module layout
 

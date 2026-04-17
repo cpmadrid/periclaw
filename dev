@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+
+# Mission Control Desktop — Developer Convenience Script
+# Thin router; activity implementations live in Scripts/.
+# Mirrors the pattern used by apps across Sassy Dog (lupita, velovate,
+# tailoredtip, quickshot, brewslate).
+#
+# Usage: ./dev <activity> [options]
+
+set -euo pipefail
+
+DEV_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./Scripts/lib.sh
+source "${DEV_SCRIPT_DIR}/Scripts/lib.sh"
+
+show_help() {
+    cat << 'EOF'
+Mission Control Desktop — Developer Convenience Script
+
+USAGE:
+    ./dev <activity> [options]
+
+ACTIVITIES:
+    run (r)                  Build and run the app (default mode: auto)
+    build (b)                Build a binary
+    test (t)                 Run cargo tests
+    check (c)                cargo check --all-targets (fast, no codegen)
+    lint (l)                 cargo clippy --all-targets -- -D warnings
+    fmt (f)                  cargo fmt (add --check for dry-run)
+    ci                       Full CI pipeline (fmt-check, clippy, test, release build)
+    cross-arm64              Cross-compile for ubu-3xdv (aarch64-linux-gnu)
+    clean                    cargo clean
+    version (v)              Print app version, build number, git sha
+    help (h, -h, --help)     Show this help
+
+RUN OPTIONS:
+    --mode <mock|ssh|ws|auto>
+                             Data source. Default: auto (use env vars as-is)
+                               mock   — scripted fixture (no network)
+                               ssh    — SSH+file reader (real data)
+                               ws     — native WS handshake (health only today)
+    --ssh-host <target>      SSH target for --mode ssh (default: workstation)
+    --release, -r            Release build
+    --no-build               Skip cargo build; exec the pre-built binary
+
+BUILD OPTIONS:
+    --release, -r            Release build + strip
+    --clean                  cargo clean first
+
+FMT OPTIONS:
+    --check                  cargo fmt --all --check (doesn't modify)
+
+GENERAL:
+    --verbose                Verbose logging (RUST_LOG=sassy_mc=trace)
+    --quiet                  Minimal logging (RUST_LOG=warn)
+
+EXAMPLES:
+    ./dev run                               # auto mode, debug
+    ./dev run --mode mock                   # scripted fixture
+    ./dev run --mode ssh                    # real data via ssh workstation
+    ./dev run --mode ssh --ssh-host ubu-3xdv
+    ./dev run --release                     # release build + run
+    ./dev build --release                   # stripped release binary
+    ./dev test                              # cargo test
+    ./dev ci                                # everything CI runs
+    ./dev cross-arm64                       # build for ubu-3xdv
+    ./dev fmt --check                       # format check without writing
+
+EOF
+}
+
+# Defaults
+ACTIVITY=""
+BUILD_TYPE="debug"
+MODE="auto"
+SSH_HOST="workstation"
+NO_BUILD=false
+CLEAN=false
+FMT_CHECK=false
+VERBOSE=false
+QUIET=false
+
+# -----------------------------------------------------------------------------
+# Arg parsing — activity first, then flags.
+# -----------------------------------------------------------------------------
+
+if [[ $# -eq 0 ]]; then
+    show_help
+    exit 0
+fi
+
+ACTIVITY="$1"
+shift
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --release|-r)     BUILD_TYPE="release"; shift ;;
+        --debug|-d)       BUILD_TYPE="debug"; shift ;;
+        --mode)           MODE="$2"; shift 2 ;;
+        --ssh-host)       SSH_HOST="$2"; shift 2 ;;
+        --no-build)       NO_BUILD=true; shift ;;
+        --clean)          CLEAN=true; shift ;;
+        --check)          FMT_CHECK=true; shift ;;
+        --verbose)        VERBOSE=true; shift ;;
+        --quiet)          QUIET=true; shift ;;
+        -h|--help|help)   show_help; exit 0 ;;
+        --)               shift; break ;;
+        *)                # Pass unknown args through to subscripts (e.g., cargo test filter)
+                          EXTRA_ARGS+=("$1"); shift ;;
+    esac
+done
+EXTRA_ARGS=("${EXTRA_ARGS[@]:-}")
+
+# Export knobs consumed by Scripts/*.sh
+export BUILD_TYPE MODE SSH_HOST NO_BUILD CLEAN
+
+if [[ "$VERBOSE" == "true" ]]; then
+    export RUST_LOG="sassy_mc=trace,debug"
+elif [[ "$QUIET" == "true" ]]; then
+    export RUST_LOG="warn"
+fi
+
+# -----------------------------------------------------------------------------
+# Activity dispatch
+# -----------------------------------------------------------------------------
+
+case "$ACTIVITY" in
+    run|r)
+        "${DEV_SCRIPT_DIR}/Scripts/run.sh"
+        ;;
+    build|b)
+        "${DEV_SCRIPT_DIR}/Scripts/build.sh"
+        ;;
+    test|t)
+        "${DEV_SCRIPT_DIR}/Scripts/test.sh" "${EXTRA_ARGS[@]}"
+        ;;
+    check|c)
+        cd_to_project_root
+        print_step "cargo check --all-targets"
+        cargo check --all-targets
+        print_success "check passed"
+        ;;
+    lint|l|clippy)
+        cd_to_project_root
+        print_step "cargo clippy --all-targets -- -D warnings"
+        cargo clippy --all-targets -- -D warnings
+        print_success "clippy clean"
+        ;;
+    fmt|f)
+        cd_to_project_root
+        if [[ "$FMT_CHECK" == "true" ]]; then
+            print_step "cargo fmt --all -- --check"
+            cargo fmt --all -- --check
+            print_success "format clean"
+        else
+            print_step "cargo fmt --all"
+            cargo fmt --all
+            print_success "formatted"
+        fi
+        ;;
+    ci)
+        "${DEV_SCRIPT_DIR}/Scripts/ci.sh"
+        ;;
+    cross-arm64)
+        "${DEV_SCRIPT_DIR}/Scripts/cross-arm64.sh"
+        ;;
+    clean)
+        cd_to_project_root
+        print_step "cargo clean"
+        cargo clean
+        print_success "cleaned"
+        ;;
+    version|v)
+        cd_to_project_root
+        print_info "$APP_NAME v${APP_VERSION} (#$(get_build_number), $(git_short_sha))"
+        ;;
+    help|h|-h|--help)
+        show_help
+        ;;
+    *)
+        print_error "unknown activity: ${ACTIVITY}"
+        echo
+        show_help
+        exit 1
+        ;;
+esac
