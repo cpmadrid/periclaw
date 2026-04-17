@@ -29,6 +29,21 @@ Or directly:
 cargo run
 ```
 
+### Real data from ubu-3xdv
+
+The native WS handshake against OpenClaw's gateway (`net::openclaw`) isn't fully working yet. The working path for v1 is SSH+file-reader:
+
+```bash
+OPENCLAW_SSH_HOST=workstation cargo run
+```
+
+This reads `~/.openclaw/cron/jobs.json` and `~/.openclaw/openclaw.json` via `ssh <host> cat <path>` — sub-400ms per poll over Tailscale. Cron state is live; channel status is optimistic (enabled == connected) since real connection state requires the WS channel we haven't unlocked yet.
+
+Mode selector in `app::App::subscription`:
+- `OPENCLAW_MOCK=1` → scripted fixture stream (offline demo)
+- `OPENCLAW_SSH_HOST=<target>` → SSH file reader (real data)
+- Neither → native WS attempt (currently times out; tracks in M3.2)
+
 ## Build for release
 
 ```bash

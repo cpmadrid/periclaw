@@ -7,7 +7,7 @@ use iced::widget::{Canvas, canvas};
 use iced::{Element, Length, Subscription, time};
 
 use crate::domain::{Agent, AgentId, AgentStatus, agent};
-use crate::net::{WsEvent, events, mock, openclaw};
+use crate::net::{WsEvent, events, mock, openclaw, openclaw_ssh};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
 use crate::ui::{agent_card, sidebar, status_bar, theme};
 
@@ -179,8 +179,11 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
+        // Selector: mock > ssh+cli > native ws (scaffolded, handshake TBD).
         let ws = if mock::enabled() {
             Subscription::run(mock::connect).map(Message::Ws)
+        } else if openclaw_ssh::host().is_some() {
+            Subscription::run(openclaw_ssh::connect).map(Message::Ws)
         } else {
             Subscription::run(openclaw::connect).map(Message::Ws)
         };
