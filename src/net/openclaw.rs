@@ -80,9 +80,13 @@ const CHANNEL_HEARTBEAT: Duration = Duration::from_secs(30);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Wait while the operator approves a pending scope-upgrade
-/// pair-request. Fast reconnect would just re-file the same
-/// requestId and leak more log noise.
-const SCOPE_UPGRADE_BACKOFF: Duration = Duration::from_secs(60);
+/// pair-request. The gateway mints a fresh requestId on every
+/// reconnect attempt — if we retry on a short cycle the id shown
+/// in the UI goes stale before the operator can copy and run the
+/// approve command. 5 minutes is comfortably longer than the
+/// "copy, ssh in, paste" round-trip; the operator can also just
+/// relaunch the desktop to force an immediate retry once approved.
+const SCOPE_UPGRADE_BACKOFF: Duration = Duration::from_secs(300);
 
 /// Milliseconds since the UNIX epoch — the format `signedAtMs` in
 /// the device-auth payload expects. Falls back to zero if the system
