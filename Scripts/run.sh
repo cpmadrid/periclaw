@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Run — cargo run wrapper with OpenClaw mode selection.
-# Invoked via `./dev run [--release] [--mode mock|ssh|ws]`.
+# Invoked via `./dev run [--release] [--mode mock|ws]`.
 
 set -euo pipefail
 
@@ -11,8 +11,7 @@ source "${SCRIPT_DIR}/lib.sh"
 cd_to_project_root
 
 BUILD_TYPE="${BUILD_TYPE:-debug}"
-MODE="${MODE:-auto}"        # auto | mock | ssh | ws
-SSH_HOST="${SSH_HOST:-workstation}"
+MODE="${MODE:-auto}"        # auto | mock | ws
 NO_BUILD="${NO_BUILD:-false}"
 LOG_TARGETS="${LOG_TARGETS:-console}"   # console | file | both
 LOG_FILE="${LOG_FILE:-}"                # empty → auto-generate under Logs/
@@ -39,30 +38,21 @@ fi
 case "$MODE" in
     mock)
         export OPENCLAW_MOCK=1
-        unset OPENCLAW_SSH_HOST
         mode_desc="mock (fixture scenario)"
         ;;
-    ssh)
-        unset OPENCLAW_MOCK
-        export OPENCLAW_SSH_HOST="$SSH_HOST"
-        mode_desc="ssh (${SSH_HOST})"
-        ;;
     ws)
-        unset OPENCLAW_MOCK OPENCLAW_SSH_HOST
-        mode_desc="native ws (scoped methods need pairing — M3.3)"
+        unset OPENCLAW_MOCK
+        mode_desc="native ws"
         ;;
     auto)
-        # Use whatever the environment already has; don't override.
         if [[ -n "${OPENCLAW_MOCK:-}" ]]; then
             mode_desc="mock (inherited)"
-        elif [[ -n "${OPENCLAW_SSH_HOST:-}" ]]; then
-            mode_desc="ssh (inherited ${OPENCLAW_SSH_HOST})"
         else
-            mode_desc="native ws (no env vars set)"
+            mode_desc="native ws"
         fi
         ;;
     *)
-        print_error "unknown --mode '$MODE' (expected: mock, ssh, ws, auto)"
+        print_error "unknown --mode '$MODE' (expected: mock, ws, auto)"
         exit 1
         ;;
 esac

@@ -34,12 +34,9 @@ ACTIVITIES:
     help (h, -h, --help)     Show this help
 
 RUN OPTIONS:
-    --mode <mock|ssh|ws|auto>
-                             Data source. Default: auto (use env vars as-is)
-                               mock   — scripted fixture (no network)
-                               ssh    — SSH+file reader (legacy debug)
-                               ws     — native WS push stream (default)
-    --ssh-host <target>      SSH target for --mode ssh (default: workstation)
+    --mode <mock|ws|auto>    Data source. Default: auto (use env vars as-is)
+                               mock — scripted fixture (no network)
+                               ws   — native WS push stream (default)
     --release, -r            Release build
     --no-build               Skip cargo build; exec the pre-built binary
 
@@ -67,7 +64,6 @@ GENERAL:
 EXAMPLES:
     ./dev run                               # auto mode, debug, console logs
     ./dev run --mode mock                   # scripted fixture
-    ./dev run --mode ssh --ssh-host ubu-3xdv
     ./dev run --log both                    # tee logs to console + file
     ./dev run --log file --log-level trace  # capture verbose trace to file
     ./dev run --log-file /tmp/ws.log --log both
@@ -85,7 +81,6 @@ EOF
 ACTIVITY=""
 BUILD_TYPE="debug"
 MODE="auto"
-SSH_HOST="workstation"
 NO_BUILD=false
 CLEAN=false
 FMT_CHECK=false
@@ -112,7 +107,6 @@ while [[ $# -gt 0 ]]; do
         --release|-r)     BUILD_TYPE="release"; shift ;;
         --debug|-d)       BUILD_TYPE="debug"; shift ;;
         --mode)           MODE="$2"; shift 2 ;;
-        --ssh-host)       SSH_HOST="$2"; shift 2 ;;
         --no-build)       NO_BUILD=true; shift ;;
         --clean)          CLEAN=true; shift ;;
         --check)          FMT_CHECK=true; shift ;;
@@ -155,7 +149,7 @@ fi
 export RUST_LOG
 
 # Export knobs consumed by Scripts/*.sh
-export BUILD_TYPE MODE SSH_HOST NO_BUILD CLEAN LOG_TARGETS LOG_LEVEL LOG_FILE
+export BUILD_TYPE MODE NO_BUILD CLEAN LOG_TARGETS LOG_LEVEL LOG_FILE
 
 # -----------------------------------------------------------------------------
 # Activity dispatch

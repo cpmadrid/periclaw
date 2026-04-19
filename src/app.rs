@@ -9,7 +9,7 @@ use iced::{Element, Length, Subscription, time};
 use crate::domain::{Agent, AgentId, AgentStatus, agent};
 use crate::net::events::ActivityKind;
 use crate::net::rpc::ApprovalEventPayload;
-use crate::net::{WsEvent, events, mock, openclaw, openclaw_ssh};
+use crate::net::{WsEvent, events, mock, openclaw};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
 use crate::ui::{agent_card, sidebar, status_bar, theme};
 
@@ -245,23 +245,10 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        // Selector (in precedence order):
-        //   1. `OPENCLAW_MOCK=1`            → synthetic fixtures (dev UI work)
-        //   2. native WS                    → push-driven live data (default)
-        //   3. `OPENCLAW_SSH_HOST=<host>` + `OPENCLAW_FORCE_SSH=1` → SSH file
-        //      reader (legacy debug fallback).
-        //
-        // SSH is no longer selected by mere presence of `OPENCLAW_SSH_HOST`
-        // because that env var is widely set in dev shells and we don't want
-        // to accidentally fall back to polling. Opt in explicitly with
-        // `OPENCLAW_FORCE_SSH=1` when diagnosing WS issues.
-        let force_ssh = std::env::var("OPENCLAW_FORCE_SSH")
-            .ok()
-            .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+        // `OPENCLAW_MOCK=1` routes to the scripted fixture stream for UI
+        // work without a live gateway; otherwise we run the native WS.
         let ws = if mock::enabled() {
             Subscription::run(mock::connect).map(Message::Ws)
-        } else if force_ssh && openclaw_ssh::host().is_some() {
-            Subscription::run(openclaw_ssh::connect).map(Message::Ws)
         } else {
             Subscription::run(openclaw::connect).map(Message::Ws)
         };
