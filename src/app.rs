@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use iced::widget::{Canvas, canvas};
-use iced::{Element, Length, Subscription, time};
+use iced::{Element, Length, Subscription, Task, time};
 
 use crate::domain::{Agent, AgentId, AgentKind, AgentStatus, agent};
 use crate::net::events::{ActivityKind, GatewayUpdate};
@@ -34,6 +34,14 @@ pub enum Message {
         id: String,
         decision: &'static str,
     },
+    /// Copy a string to the system clipboard — the UI uses this for
+    /// one-click copying of shell commands the operator needs to run
+    /// (e.g. the scope-upgrade approve line).
+    CopyToClipboard(String),
+    /// No-op sink for read-only `text_input` widgets (they require
+    /// an `on_input` handler to stay interactive/selectable). The
+    /// field's contents are discarded.
+    InputDiscard(String),
 }
 
 pub struct App {
@@ -105,15 +113,17 @@ impl Default for App {
 }
 
 impl App {
-    pub fn update(&mut self, message: Message) {
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::NavClicked(item) => {
                 self.nav = item;
+                Task::none()
             }
             Message::Ws(event) => {
                 self.apply_ws(event);
                 // Invalidate canvas cache so sprites re-render at new positions.
                 self.scene_cache.clear();
+                Task::none()
             }
             Message::ResolveApproval { id, decision } => {
                 tracing::info!(id = %id, decision, "UI: resolve approval");
@@ -131,7 +141,13 @@ impl App {
                 ) {
                     tracing::warn!(error = %e, "could not dispatch ResolveApproval command");
                 }
+                Task::none()
             }
+            Message::CopyToClipboard(value) => {
+                tracing::debug!(len = value.len(), "UI: copy to clipboard");
+                iced::clipboard::write(value)
+            }
+            Message::InputDiscard(_) => Task::none(),
             Message::Tick => {
                 let now = Instant::now();
                 let before = self.bubbles.len();
@@ -142,6 +158,7 @@ impl App {
                     // Force a redraw while bubbles exist so their alpha animates.
                     self.scene_cache.clear();
                 }
+                Task::none()
             }
         }
     }

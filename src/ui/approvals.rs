@@ -17,21 +17,38 @@ use crate::net::rpc::ApprovalEventPayload;
 use crate::ui::theme;
 
 /// Render a "scope-upgrade pair-request pending" notice. Shows the
-/// request id + the CLI command that approves it, so the operator
-/// can act without digging through logs.
+/// CLI command in a selectable field + a Copy button so the operator
+/// doesn't have to manually retype or dig through logs.
 pub fn scope_upgrade_notice(request_id: &str) -> Element<'_, Message> {
+    let command = format!("openclaw devices approve {request_id}");
+
+    // text_input needs an on_input to stay interactive/selectable;
+    // we wire it to the InputDiscard sink so any edits are dropped.
+    let field = iced::widget::text_input("", &command)
+        .on_input(Message::InputDiscard)
+        .font(iced::Font::MONOSPACE)
+        .size(11)
+        .padding(Padding::from([4, 8]))
+        .width(Length::Fill);
+
+    let copy = iced::widget::button(text("Copy").size(11))
+        .padding(Padding::from([4, 10]))
+        .on_press(Message::CopyToClipboard(command.clone()));
+
+    let command_row = row![field, copy]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
     let body = column![
         text("Scope upgrade pending").size(12).color(*theme::MUTED),
         text(
             "The gateway has filed a pair-request to grant this \
-             desktop approvals permission. Approve it once:",
+             desktop approvals permission. Run this on ubu-3xdv:",
         )
         .size(12)
         .color(*theme::FOREGROUND),
-        text(format!("openclaw devices approve {request_id}"))
-            .size(11)
-            .color(*theme::TERMINAL_GREEN)
-            .font(iced::Font::MONOSPACE),
+        command_row,
     ]
     .spacing(6);
 
