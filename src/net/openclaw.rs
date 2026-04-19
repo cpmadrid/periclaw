@@ -63,6 +63,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use crate::config;
 use crate::device_identity::{DeviceIdentity, SignConnectParams};
 use crate::domain::AgentId;
+use crate::net::commands::{self, GatewayCommand};
 use crate::net::WsEvent;
 use crate::net::events::{
     ActivityKind, agent_stream_to_activity, cron_job_from_event,
@@ -122,6 +123,17 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
             }
         };
 
+        // Claim the UI→WS command receiver. Single owner — subsequent
+        // reconnects reuse the same receiver across session attempts.
+        // If someone already took it (shouldn't happen on a fresh
+        // process) we substitute a dangling receiver so the session
+        // loop's select arm has something to await without panicking.
+        let mut cmd_rx = commands::take_rx().unwrap_or_else(|| {
+            tracing::warn!("command receiver already claimed; UI → WS commands will no-op");
+            let (_dangling_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            rx
+        });
+
         let mut backoff = INITIAL_BACKOFF;
 
         loop {
@@ -130,6 +142,7 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
                 &gateway_url,
                 &instance_id,
                 device.as_ref(),
+                &mut cmd_rx,
                 &mut out,
             )
             .await
@@ -170,6 +183,7 @@ async fn session(
     gateway_url: &str,
     instance_id: &str,
     device: Option<&DeviceIdentity>,
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<GatewayCommand>,
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
 ) -> Result<(), SessionError> {
     tracing::info!(
@@ -440,7 +454,70 @@ async fn session(
                     Some(Ok(_)) => {}
                 }
             }
+            Some(cmd) = cmd_rx.recv() => {
+                rpc_id += 1;
+                send_command_rpc(&mut socket, rpc_id, &cmd).await?;
+            }
         }
+    }
+}
+
+/// Pure helper — build the RPC frame JSON for a UI command. Split
+/// from the socket-sending path so the envelope can be unit-tested
+/// against gateway schemas without a live WS.
+fn build_command_frame(id: u64, cmd: &GatewayCommand) -> (&'static str, Value) {
+    let (method, params) = match cmd {
+        GatewayCommand::ResolveApproval {
+            id: approval_id,
+            decision,
+        } => (
+            "exec.approval.resolve",
+            json!({ "id": approval_id, "decision": decision }),
+        ),
+    };
+    let frame = json!({
+        "type": "req",
+        "id": id.to_string(),
+        "method": method,
+        "params": params,
+    });
+    (method, frame)
+}
+
+async fn send_command_rpc(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    cmd: &GatewayCommand,
+) -> Result<(), SessionError> {
+    let (method, frame) = build_command_frame(id, cmd);
+    tracing::info!(method, id, "sending UI command");
+    socket
+        .send(WsMsg::Text(frame.to_string().into()))
+        .await
+        .map_err(|e| SessionError::Send(e.to_string()))
+}
+
+#[cfg(test)]
+mod command_rpc_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_approval_frame_matches_gateway_schema() {
+        let cmd = GatewayCommand::ResolveApproval {
+            id: "abc-123".into(),
+            decision: "allow-once".into(),
+        };
+        let (method, frame) = build_command_frame(42, &cmd);
+        assert_eq!(method, "exec.approval.resolve");
+        // Matches OpenClaw's `validateExecApprovalResolveParams`
+        // (server-methods/exec-approval.ts:332) — `{id, decision}`.
+        assert_eq!(frame["type"], "req");
+        assert_eq!(frame["id"], "42");
+        assert_eq!(frame["method"], "exec.approval.resolve");
+        assert_eq!(frame["params"]["id"], "abc-123");
+        assert_eq!(frame["params"]["decision"], "allow-once");
     }
 }
 

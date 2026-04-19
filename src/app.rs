@@ -11,7 +11,7 @@ use crate::net::events::ActivityKind;
 use crate::net::rpc::ApprovalEventPayload;
 use crate::net::{WsEvent, events, mock, openclaw};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
-use crate::ui::{agent_card, sidebar, status_bar, theme};
+use crate::ui::{agent_card, approvals, sidebar, status_bar, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavItem {
@@ -26,6 +26,11 @@ pub enum Message {
     NavClicked(NavItem),
     Ws(WsEvent),
     Tick,
+    /// Operator resolved a pending exec approval from the UI. The
+    /// decision string matches OpenClaw's `ExecApprovalDecision`
+    /// (`"allow-once" | "deny"` — `allow-always` intentionally not
+    /// surfaced from the desktop to keep blast radius low).
+    ResolveApproval { id: String, decision: &'static str },
 }
 
 pub struct App {
@@ -86,6 +91,20 @@ impl App {
                 self.apply_ws(event);
                 // Invalidate canvas cache so sprites re-render at new positions.
                 self.scene_cache.clear();
+            }
+            Message::ResolveApproval { id, decision } => {
+                tracing::info!(id = %id, decision, "UI: resolve approval");
+                // Optimistically drop the entry so the panel collapses
+                // immediately; the gateway's `exec.approval.resolved`
+                // event will arrive shortly and confirm. If the RPC
+                // fails, the operator can retry when/if the event
+                // re-fires (real rare case).
+                self.pending_approvals.remove(&id);
+                if let Err(e) = crate::net::commands::sender()
+                    .send(crate::net::commands::GatewayCommand::ResolveApproval { id, decision: decision.to_string() })
+                {
+                    tracing::warn!(error = %e, "could not dispatch ResolveApproval command");
+                }
             }
             Message::Tick => {
                 let now = Instant::now();
@@ -315,15 +334,27 @@ impl App {
             pending_approvals: self.pending_approvals.len(),
         });
 
-        iced::widget::column![
+        // The approvals panel is a no-op row (empty iterator) when
+        // nothing's pending, so we can always include it in the
+        // layout without case-splitting on length.
+        let approvals_panel = if self.pending_approvals.is_empty() {
+            None
+        } else {
+            Some(approvals::view(self.pending_approvals.iter()))
+        };
+
+        let mut col = iced::widget::column![
             iced::widget::container(canvas)
                 .width(Length::Fill)
                 .height(Length::FillPortion(3))
                 .padding(iced::Padding::from(16)),
             cards,
-            status,
         ]
-        .into()
+        .spacing(0);
+        if let Some(panel) = approvals_panel {
+            col = col.push(panel);
+        }
+        col.push(status).into()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
