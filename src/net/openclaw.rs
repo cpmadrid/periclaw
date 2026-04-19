@@ -603,6 +603,30 @@ async fn handle_event(
                 .await;
         }
         "session.tool" => {
+            // Extract the tool name and phase so the bubble text is
+            // useful ("⚙ bash", "⚙ read_file", etc.) instead of a
+            // generic "tool-calling" indicator. Multiple tool events
+            // fire per invocation (start/output/done); we render a
+            // bubble only on `phase == "start"` to avoid flashing.
+            let Some(payload) = payload else { return Ok(()) };
+            let data = payload.get("data");
+            let phase = data
+                .and_then(|d| d.get("phase"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let tool_name = data
+                .and_then(|d| d.get("name").or_else(|| d.get("tool")))
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            tracing::debug!(phase, tool = tool_name, "session.tool");
+            if phase == "start" {
+                let _ = out
+                    .send(WsEvent::AgentMessage {
+                        agent_id: AgentId::new(CHAT_AGENT_ID),
+                        text: format!("⚙ {tool_name}"),
+                    })
+                    .await;
+            }
             send_activity(out, ActivityKind::ToolCalling).await;
         }
 
