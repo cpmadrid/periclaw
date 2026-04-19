@@ -267,12 +267,15 @@ async fn session(
     let client_id = "openclaw-tui";
     let client_mode = "ui";
     let role = "operator";
-    // `operator.approvals` is required for `exec.approval.resolve` to
-    // land (server-methods/method-scopes.ts:43). Without it the button
-    // clicks look like they worked (the panel collapses optimistically)
-    // but the gateway silently ignores the RPC and re-broadcasts the
-    // same pending approval on the next reconnect.
-    let scopes: &[&str] = &["operator.read", "operator.approvals"];
+    // Stay on `operator.read` — adding `operator.approvals` triggers
+    // a scope-upgrade pair request the operator has to approve, and
+    // if they don't, every reconnect files yet another pending
+    // request (flooded the pair-request table once already). The
+    // approval UI's Allow/Deny is therefore cosmetic until the
+    // device is re-paired with approvals scope; a follow-up can
+    // either request the upgrade explicitly or surface the scope
+    // gap in the UI instead of looping.
+    let scopes: &[&str] = &["operator.read"];
     let mut params_obj = json!({
         "minProtocol": 3,
         "maxProtocol": 3,
