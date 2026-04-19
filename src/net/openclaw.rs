@@ -68,6 +68,7 @@ use crate::net::events::{
 };
 use crate::net::rpc::{
     AgentEventPayload, ApprovalEventPayload, Channel, CronEventPayload, CronJob, MainAgent,
+    SessionInfo,
 };
 
 /// Cadence of the channel-status heartbeat RPC. Channels are not yet
@@ -352,6 +353,11 @@ async fn session(
     // gate), so Slack/Telegram conversations wouldn't reach the UI.
     rpc_id += 1;
     send_rpc(&mut socket, rpc_id, "sessions.subscribe").await?;
+    // Initial session-list fetch so the status bar has token-usage
+    // numbers immediately; subsequent session.message events keep it
+    // in sync as the main session grows.
+    rpc_id += 1;
+    send_rpc(&mut socket, rpc_id, "sessions.list").await?;
 
     // UUID → human-readable cron name cache, populated from the
     // snapshot and consulted when cron events arrive. Empty until
@@ -451,6 +457,21 @@ async fn handle_frame(
                     }
                 }
                 let _ = out.send(WsEvent::CronSnapshot(crons)).await;
+                return Ok(());
+            }
+            if let Some(sessions) = try_session_list(payload) {
+                tracing::debug!(count = sessions.len(), "session list");
+                for s in sessions {
+                    if let (Some(total), Some(ctx)) = (s.total_tokens, s.context_tokens) {
+                        let _ = out
+                            .send(WsEvent::SessionUsage {
+                                session_key: s.key,
+                                total_tokens: total,
+                                context_tokens: ctx,
+                            })
+                            .await;
+                    }
+                }
                 return Ok(());
             }
             if let Some(channels) = try_channel_list(payload) {
@@ -588,6 +609,22 @@ async fn handle_event(
                 seen_message_ids.push_back(mid.to_string());
                 if seen_message_ids.len() > 32 {
                     seen_message_ids.pop_front();
+                }
+            }
+            // Pick off the session-usage snapshot that the gateway
+            // spreads into this payload — lets the status bar track
+            // context growth without a separate poll.
+            if let Some(session_key) = payload.get("sessionKey").and_then(Value::as_str) {
+                let total = payload.get("totalTokens").and_then(Value::as_i64);
+                let ctx = payload.get("contextTokens").and_then(Value::as_i64);
+                if let (Some(total), Some(ctx)) = (total, ctx) {
+                    let _ = out
+                        .send(WsEvent::SessionUsage {
+                            session_key: session_key.to_string(),
+                            total_tokens: total,
+                            context_tokens: ctx,
+                        })
+                        .await;
                 }
             }
             let text = extract_message_text(payload);
@@ -767,6 +804,15 @@ fn try_channel_list(v: &Value) -> Option<Vec<Channel>> {
         .collect::<Vec<_>>();
 
     (!channels.is_empty()).then_some(channels)
+}
+
+fn try_session_list(v: &Value) -> Option<Vec<SessionInfo>> {
+    let arr = v.get("sessions").and_then(Value::as_array)?;
+    let out: Vec<SessionInfo> = arr
+        .iter()
+        .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+        .collect();
+    (!out.is_empty()).then_some(out)
 }
 
 fn try_main_agent(v: &Value) -> Option<MainAgent> {

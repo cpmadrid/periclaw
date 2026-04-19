@@ -15,6 +15,12 @@ pub struct Snapshot<'a> {
     pub last_poll: Option<Instant>,
     pub active_model: Option<&'a str>,
     pub last_disconnect: Option<&'a str>,
+    /// Token usage of the main session (`totalTokens`, `contextTokens`).
+    /// `None` until the first sessions.list / session.message snapshot
+    /// lands.
+    pub main_usage: Option<(i64, i64)>,
+    /// Count of exec approvals awaiting operator decision.
+    pub pending_approvals: usize,
 }
 
 pub fn view(snap: Snapshot<'_>) -> Element<'_, Message> {
@@ -34,6 +40,30 @@ pub fn view(snap: Snapshot<'_>) -> Element<'_, Message> {
         })
         .unwrap_or_default();
 
+    let (ctx_text, ctx_color) = match snap.main_usage {
+        None => (String::new(), *theme::MUTED),
+        Some((total, ctx)) => {
+            // Paint yellow when we cross 80% of ctx, red when over.
+            let color = if ctx > 0 && total >= ctx {
+                *theme::STATUS_DOWN
+            } else if ctx > 0 && total as f64 >= (ctx as f64) * 0.8 {
+                *theme::STATUS_DEGRADED
+            } else {
+                *theme::MUTED
+            };
+            (
+                format!("· ctx {}/{}", compact_count(total), compact_count(ctx)),
+                color,
+            )
+        }
+    };
+
+    let approvals_text = if snap.pending_approvals > 0 {
+        format!("· {} approval(s) pending", snap.pending_approvals)
+    } else {
+        String::new()
+    };
+
     container(
         row![
             text(dot).size(12).color(if snap.connected {
@@ -45,6 +75,8 @@ pub fn view(snap: Snapshot<'_>) -> Element<'_, Message> {
             text(agents).size(11).color(*theme::MUTED),
             text(model).size(11).color(*theme::MUTED),
             text(age).size(11).color(*theme::MUTED),
+            text(ctx_text).size(11).color(ctx_color),
+            text(approvals_text).size(11).color(*theme::STATUS_DEGRADED),
         ]
         .spacing(12)
         .align_y(iced::Alignment::Center),
@@ -79,6 +111,18 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..max])
+    }
+}
+
+/// Short-form token counts for the status bar (`34K`, `1.2M`, `420`).
+fn compact_count(n: i64) -> String {
+    let abs = n.unsigned_abs();
+    if abs >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if abs >= 1_000 {
+        format!("{}K", n / 1_000)
+    } else {
+        n.to_string()
     }
 }
 

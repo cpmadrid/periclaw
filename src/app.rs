@@ -44,7 +44,18 @@ pub struct App {
     /// `exec.approval.requested`, cleared by `.resolved`. Scope-gated
     /// (empty unless the gateway granted `operator.read`+approvals).
     pub pending_approvals: HashMap<String, ApprovalEventPayload>,
+    /// Per-session token usage (`totalTokens` / `contextTokens`).
+    /// Populated from the sessions.list snapshot and kept fresh via
+    /// session.message events. Lets the status bar warn when the
+    /// main session is near its context ceiling.
+    pub session_usage: HashMap<String, SessionUsage>,
     pub scene_cache: canvas::Cache,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SessionUsage {
+    pub total_tokens: i64,
+    pub context_tokens: i64,
 }
 
 impl Default for App {
@@ -59,6 +70,7 @@ impl Default for App {
             connected: false,
             last_disconnect: None,
             pending_approvals: HashMap::new(),
+            session_usage: HashMap::new(),
             scene_cache: canvas::Cache::default(),
         }
     }
@@ -181,6 +193,25 @@ impl App {
                 self.last_poll = Some(Instant::now());
                 tracing::trace!("sessions.changed");
             }
+            WsEvent::SessionUsage {
+                session_key,
+                total_tokens,
+                context_tokens,
+            } => {
+                tracing::debug!(
+                    session = %session_key,
+                    total = total_tokens,
+                    ctx = context_tokens,
+                    "session usage",
+                );
+                self.session_usage.insert(
+                    session_key,
+                    SessionUsage {
+                        total_tokens,
+                        context_tokens,
+                    },
+                );
+            }
             WsEvent::ApprovalRequested(payload) => {
                 self.last_poll = Some(Instant::now());
                 let key = payload.id.clone().unwrap_or_else(|| {
@@ -270,12 +301,18 @@ impl App {
 
         let cards = agent_card::row_view(&self.roster, &self.statuses);
 
+        let main_usage = self
+            .session_usage
+            .get("agent:main:main")
+            .map(|u| (u.total_tokens, u.context_tokens));
         let status = status_bar::view(status_bar::Snapshot {
             connected: self.connected,
             agents_tracked: self.statuses.len(),
             last_poll: self.last_poll,
             active_model: self.active_model.as_deref(),
             last_disconnect: self.last_disconnect.as_deref(),
+            main_usage,
+            pending_approvals: self.pending_approvals.len(),
         });
 
         iced::widget::column![

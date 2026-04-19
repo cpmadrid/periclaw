@@ -88,6 +88,18 @@ pub struct CronEventPayload {
     pub next_run_at_ms: Option<i64>,
 }
 
+/// One entry in the `sessions.list` response (and embedded in the
+/// `sessionSnapshot` spread on `session.message` payloads). We only
+/// pull the fields the status bar reads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionInfo {
+    pub key: String,
+    #[serde(default, rename = "totalTokens")]
+    pub total_tokens: Option<i64>,
+    #[serde(default, rename = "contextTokens")]
+    pub context_tokens: Option<i64>,
+}
+
 /// Gateway broadcast `agent` event. Shape from
 /// `openclaw/src/gateway/server-chat.ts` agent-run stream payloads.
 ///

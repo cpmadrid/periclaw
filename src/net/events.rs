@@ -38,6 +38,14 @@ pub enum WsEvent {
     },
     /// A session summary changed (scope-gated; only arrives with READ scope).
     SessionsChanged,
+    /// Token usage snapshot for a single session — drives the status
+    /// bar's `ctx:` indicator so a 32K-context overflow is visible on
+    /// the desktop instead of surfacing only when the next turn fails.
+    SessionUsage {
+        session_key: String,
+        total_tokens: i64,
+        context_tokens: i64,
+    },
     /// Pending exec approval requires operator attention.
     ApprovalRequested(ApprovalEventPayload),
     /// Previously-pending approval has resolved (granted/denied).
