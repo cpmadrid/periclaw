@@ -5,7 +5,8 @@
 
 use crate::domain::{AgentId, AgentStatus};
 use crate::net::rpc::{
-    AgentInfo, ApprovalEventPayload, Channel, CronEventPayload, CronJob, CronState, MainAgent,
+    AgentInfo, ApprovalEventPayload, Channel, CronEventPayload, CronJob, CronState, LogTailPayload,
+    MainAgent,
 };
 
 #[derive(Debug, Clone)]
@@ -59,6 +60,9 @@ pub enum WsEvent {
     /// earlier notification). Surfaces `current → latest` in the
     /// status bar so the operator sees they can upgrade.
     UpdateAvailable(Option<GatewayUpdate>),
+    /// Incremental batch of new log lines since the last cursor.
+    /// Feeds the Logs nav tab's ring buffer.
+    LogTail(LogTailPayload),
     /// Connection to the gateway is healthy.
     Connected,
     /// Connection dropped (reason for display).

@@ -70,13 +70,18 @@ use crate::net::events::{
 };
 use crate::net::rpc::{
     AgentEventPayload, AgentInfo, ApprovalEventPayload, Channel, CronEventPayload, CronJob,
-    MainAgent, SessionInfo,
+    LogTailPayload, MainAgent, SessionInfo,
 };
 
 /// Cadence of the channel-status heartbeat RPC. Channels are not yet
 /// broadcast as push events on the gateway, so we refresh via the
 /// already-open socket on a slow interval.
 const CHANNEL_HEARTBEAT: Duration = Duration::from_secs(30);
+/// Cadence of the `logs.tail` poll that drives the Logs nav tab.
+/// Fast enough to feel live (new lines land in ≤3s), slow enough to
+/// keep the bandwidth trivial (each call returns only new lines
+/// since the stored cursor).
+const LOG_TAIL_INTERVAL: Duration = Duration::from_secs(3);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Wait while the operator approves a pending scope-upgrade
@@ -521,6 +526,12 @@ async fn session(
     // on a low-cadence heartbeat over the same socket. No cron poll —
     // the gateway's `cron` broadcast covers that live.
     let mut next_channel_heartbeat = Instant::now() + CHANNEL_HEARTBEAT;
+    // Kick off log tailing one interval after connect so the Logs tab
+    // lands pre-populated by the time the operator clicks over. The
+    // cursor starts unset — the first call returns the recent slice
+    // from EOF and every subsequent call sends back only new bytes.
+    let mut next_log_tail = Instant::now() + LOG_TAIL_INTERVAL;
+    let mut log_cursor: Option<i64> = None;
 
     loop {
         tokio::select! {
@@ -529,10 +540,19 @@ async fn session(
                 send_rpc(&mut socket, rpc_id, "channels.status").await?;
                 next_channel_heartbeat = Instant::now() + CHANNEL_HEARTBEAT;
             }
+            _ = sleep_until(next_log_tail) => {
+                rpc_id += 1;
+                let params = match log_cursor {
+                    Some(c) => json!({ "cursor": c }),
+                    None => json!({}),
+                };
+                send_rpc_params(&mut socket, rpc_id, "logs.tail", params).await?;
+                next_log_tail = Instant::now() + LOG_TAIL_INTERVAL;
+            }
             msg = socket.next() => {
                 match msg {
                     Some(Ok(WsMsg::Text(txt))) => {
-                        handle_frame(&txt, out, &mut cron_id_to_name, &mut seen_message_ids).await?;
+                        handle_frame(&txt, out, &mut cron_id_to_name, &mut seen_message_ids, &mut log_cursor).await?;
                     }
                     Some(Ok(WsMsg::Ping(p))) => {
                         let _ = socket.send(WsMsg::Pong(p)).await;
@@ -624,6 +644,7 @@ async fn handle_frame(
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
     cron_id_to_name: &mut std::collections::HashMap<String, String>,
     seen_message_ids: &mut std::collections::VecDeque<String>,
+    log_cursor: &mut Option<i64>,
 ) -> Result<(), SessionError> {
     let frame: Value = serde_json::from_str(txt)?;
 
@@ -657,6 +678,12 @@ async fn handle_frame(
                     }
                 }
                 let _ = out.send(WsEvent::CronSnapshot(crons)).await;
+                return Ok(());
+            }
+            if let Some(tail) = try_log_tail(payload) {
+                tracing::trace!(lines = tail.lines.len(), cursor = tail.cursor, "log tail");
+                *log_cursor = Some(tail.cursor);
+                let _ = out.send(WsEvent::LogTail(tail)).await;
                 return Ok(());
             }
             if let Some(agents) = try_agents_list(payload) {
@@ -1058,6 +1085,19 @@ fn try_channel_list(v: &Value) -> Option<Vec<Channel>> {
         .collect::<Vec<_>>();
 
     (!channels.is_empty()).then_some(channels)
+}
+
+fn try_log_tail(v: &Value) -> Option<LogTailPayload> {
+    // Distinguishing a logs.tail response: it's the only RPC
+    // returning both `cursor` (number) and `lines` (array of strings)
+    // at the top level.
+    if !v.get("cursor").is_some_and(Value::is_number) {
+        return None;
+    }
+    if !v.get("lines").is_some_and(Value::is_array) {
+        return None;
+    }
+    serde_json::from_value(v.clone()).ok()
 }
 
 fn try_agents_list(v: &Value) -> Option<Vec<AgentInfo>> {

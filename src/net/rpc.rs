@@ -118,6 +118,23 @@ pub struct SessionInfo {
     pub context_tokens: Option<i64>,
 }
 
+/// Response of the `logs.tail` RPC
+/// (`openclaw/src/logging/log-tail.ts:13`). Returns a slice of the
+/// rolling log file starting at `cursor`; the caller stores the new
+/// cursor and passes it back on the next poll to get only new lines.
+///
+/// `reset: true` means the log file rolled over and our previous
+/// cursor is no longer valid — clear the local buffer and start over.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LogTailPayload {
+    #[serde(default)]
+    pub cursor: i64,
+    #[serde(default)]
+    pub lines: Vec<String>,
+    #[serde(default)]
+    pub reset: bool,
+}
+
 /// Gateway broadcast `agent` event. Shape from
 /// `openclaw/src/gateway/server-chat.ts` agent-run stream payloads.
 ///

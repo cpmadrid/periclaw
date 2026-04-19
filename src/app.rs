@@ -1,6 +1,6 @@
 //! Top-level app state, Message, update, view.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use iced::widget::{Canvas, canvas};
@@ -11,7 +11,7 @@ use crate::net::events::{ActivityKind, GatewayUpdate};
 use crate::net::rpc::{ApprovalEventPayload, Channel, CronState};
 use crate::net::{WsEvent, events, mock, openclaw};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
-use crate::ui::{agent_card, agents_view, approvals, sidebar, status_bar, theme};
+use crate::ui::{agent_card, agents_view, approvals, logs_view, sidebar, status_bar, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavItem {
@@ -81,6 +81,9 @@ pub struct App {
     /// Full channel state per channel agent (connected, configured,
     /// last error). Refreshed by the 30s `channels.status` heartbeat.
     pub channel_details: HashMap<AgentId, Channel>,
+    /// Rolling log-tail ring buffer, fed by the periodic `logs.tail`
+    /// RPC. Bounded so memory stays flat on a long-running session.
+    pub log_lines: VecDeque<String>,
     pub scene_cache: canvas::Cache,
 }
 
@@ -107,6 +110,7 @@ impl Default for App {
             scope_upgrade_pending: None,
             cron_details: HashMap::new(),
             channel_details: HashMap::new(),
+            log_lines: VecDeque::with_capacity(2048),
             scene_cache: canvas::Cache::default(),
         }
     }
@@ -322,6 +326,20 @@ impl App {
             WsEvent::UpdateAvailable(update) => {
                 self.gateway_update = update;
             }
+            WsEvent::LogTail(tail) => {
+                // Log rollover on the server side invalidates our
+                // ring — drop the old buffer and start fresh so the
+                // view doesn't mix two files.
+                if tail.reset {
+                    self.log_lines.clear();
+                }
+                for line in tail.lines {
+                    if self.log_lines.len() >= 2000 {
+                        self.log_lines.pop_front();
+                    }
+                    self.log_lines.push_back(line);
+                }
+            }
             WsEvent::ScopeUpgradePending(request_id) => {
                 if request_id.is_some() {
                     tracing::info!(
@@ -388,7 +406,7 @@ impl App {
                 active_model: self.active_model.as_deref(),
                 session_usage: &self.session_usage,
             }),
-            NavItem::Logs => coming_soon("Logs"),
+            NavItem::Logs => logs_view::view(self.log_lines.iter()),
             NavItem::Settings => coming_soon("Settings"),
         };
 
