@@ -138,7 +138,13 @@ impl App {
                 // Trim to a reasonable bubble length; the canvas renderer
                 // sizes the bubble by text.len().
                 let snippet = truncate(&text, 80);
-                self.bubbles.push(ThoughtBubble::new(agent_id, snippet));
+                tracing::info!(
+                    agent = %agent_id.as_str(),
+                    preview = %snippet,
+                    "agent message → bubble",
+                );
+                self.bubbles
+                    .push(ThoughtBubble::message(agent_id, snippet));
             }
             WsEvent::AgentActivity { agent_id, kind } => {
                 self.last_poll = Some(Instant::now());

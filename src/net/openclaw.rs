@@ -350,6 +350,14 @@ async fn session(
     send_rpc(&mut socket, rpc_id, "cron.list").await?;
     rpc_id += 1;
     send_rpc(&mut socket, rpc_id, "channels.status").await?;
+    // Subscribe to session events so `session.message` (text from
+    // agent turns routed through external channels like Slack) and
+    // `sessions.changed` are delivered to this connection. Without
+    // subscribing, OpenClaw suppresses chat broadcasts for
+    // non-internal channels (server-chat.ts:590 `isControlUiVisible`
+    // gate), so Slack/Telegram conversations wouldn't reach the UI.
+    rpc_id += 1;
+    send_rpc(&mut socket, rpc_id, "sessions.subscribe").await?;
 
     // UUID → human-readable cron name cache, populated from the
     // snapshot and consulted when cron events arrive. Empty until
@@ -559,11 +567,35 @@ async fn handle_event(
             let _ = out.send(WsEvent::SessionsChanged).await;
         }
 
-        // Scoped: per-message updates inside a session. For now we only
-        // trigger a "thinking" activity indicator; full session rendering
-        // is a follow-up.
+        // Scoped: per-message updates inside a session. Unlike the
+        // scope-free `chat` event (which is suppressed for non-internal
+        // channels — Slack/Telegram/WhatsApp), `session.message` fires
+        // for every assistant turn regardless of originating channel.
+        // This is the path that surfaces Slack-routed conversations
+        // onto the office scene.
         "session.message" => {
-            send_activity(out, ActivityKind::Thinking).await;
+            let Some(payload) = payload else { return Ok(()) };
+            let role = payload
+                .get("message")
+                .and_then(|m| m.get("role"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if role != "assistant" {
+                // Skip user / system / tool messages — we're surfacing
+                // agent output, not operator input.
+                return Ok(());
+            }
+            let text = extract_message_text(payload);
+            if text.trim().is_empty() {
+                return Ok(());
+            }
+            tracing::debug!(len = text.len(), "session.message assistant");
+            let _ = out
+                .send(WsEvent::AgentMessage {
+                    agent_id: AgentId::new(CHAT_AGENT_ID),
+                    text,
+                })
+                .await;
         }
         "session.tool" => {
             send_activity(out, ActivityKind::ToolCalling).await;
@@ -610,6 +642,31 @@ async fn send_activity(
             kind,
         })
         .await;
+}
+
+/// Pull human-readable text out of a `session.message` payload's
+/// `message.content[]`. OpenClaw messages carry content as an array of
+/// typed chunks (`{type:"text",text:"..."}`, tool results, media, etc.)
+/// — we concatenate the text chunks and drop the rest.
+fn extract_message_text(payload: &Value) -> String {
+    let Some(content) = payload
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return String::new();
+    };
+    content
+        .iter()
+        .filter_map(|chunk| {
+            let kind = chunk.get("type").and_then(Value::as_str)?;
+            if kind != "text" {
+                return None;
+            }
+            chunk.get("text").and_then(Value::as_str).map(str::to_string)
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn try_cron_list(v: &Value) -> Option<Vec<CronJob>> {

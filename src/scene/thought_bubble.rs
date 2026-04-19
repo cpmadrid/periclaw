@@ -12,11 +12,27 @@ use crate::domain::{AgentId, AgentStatus};
 pub const TTL: Duration = Duration::from_millis(2000);
 pub const FADE_START: Duration = Duration::from_millis(1500);
 
+/// Real-text bubbles (agent messages) live longer than status-transition
+/// stubs so an operator glancing at the desktop actually registers them.
+pub const MESSAGE_TTL: Duration = Duration::from_millis(8000);
+pub const MESSAGE_FADE_START: Duration = Duration::from_millis(6500);
+
 #[derive(Debug, Clone)]
 pub struct ThoughtBubble {
     pub agent: AgentId,
     pub text: String,
     pub born: Instant,
+    /// Real agent-message bubbles linger longer than status-transition
+    /// stubs — kept as a kind tag so alpha() picks the right TTL.
+    pub kind: BubbleKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BubbleKind {
+    /// Canned status-transition bubble ("eureka!", "anomaly!", etc.).
+    Status,
+    /// Live text from the agent — longer TTL, verbatim content.
+    Message,
 }
 
 impl ThoughtBubble {
@@ -25,20 +41,47 @@ impl ThoughtBubble {
             agent,
             text: text.into(),
             born: Instant::now(),
+            kind: BubbleKind::Status,
+        }
+    }
+
+    /// Constructor for real agent-text bubbles — picks the longer TTL.
+    pub fn message(agent: AgentId, text: impl Into<String>) -> Self {
+        Self {
+            agent,
+            text: text.into(),
+            born: Instant::now(),
+            kind: BubbleKind::Message,
+        }
+    }
+
+    fn ttl(&self) -> Duration {
+        match self.kind {
+            BubbleKind::Status => TTL,
+            BubbleKind::Message => MESSAGE_TTL,
+        }
+    }
+
+    fn fade_start(&self) -> Duration {
+        match self.kind {
+            BubbleKind::Status => FADE_START,
+            BubbleKind::Message => MESSAGE_FADE_START,
         }
     }
 
     /// Returns `None` if the bubble has expired; otherwise the alpha in `[0,1]`.
     pub fn alpha(&self, now: Instant) -> Option<f32> {
         let age = now.saturating_duration_since(self.born);
-        if age >= TTL {
+        let ttl = self.ttl();
+        let fade_start = self.fade_start();
+        if age >= ttl {
             return None;
         }
-        if age < FADE_START {
+        if age < fade_start {
             return Some(1.0);
         }
-        let fade_span = TTL - FADE_START;
-        let into_fade = age - FADE_START;
+        let fade_span = ttl - fade_start;
+        let into_fade = age - fade_start;
         Some(1.0 - (into_fade.as_secs_f32() / fade_span.as_secs_f32()))
     }
 
