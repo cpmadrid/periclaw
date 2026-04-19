@@ -62,8 +62,8 @@ fn card<'a>(agent: &'a Agent, status: AgentStatus) -> Element<'a, Message> {
             .size(13)
             .color(*theme::FOREGROUND),
     ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
 
     let badge = container(text(badge_label).size(10).color(badge_color))
         .padding(Padding::from([2, 6]))

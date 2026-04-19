@@ -63,8 +63,8 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use crate::config;
 use crate::device_identity::{DeviceIdentity, SignConnectParams};
 use crate::domain::AgentId;
-use crate::net::commands::{self, GatewayCommand};
 use crate::net::WsEvent;
+use crate::net::commands::{self, GatewayCommand};
 use crate::net::events::{
     ActivityKind, GatewayUpdate, agent_stream_to_activity, cron_job_from_event,
 };
@@ -95,7 +95,6 @@ fn chrono_now_ms() -> i64 {
 /// from it. When the desktop grows a multi-agent roster this should
 /// route by the event's `sessionKey` instead.
 const CHAT_AGENT_ID: &str = "main";
-
 
 /// Iced subscription stream for the real gateway.
 ///
@@ -188,7 +187,11 @@ async fn session(
 ) -> Result<(), SessionError> {
     tracing::info!(
         url = gateway_url,
-        auth = if token.is_some() { "token" } else { "tailscale" },
+        auth = if token.is_some() {
+            "token"
+        } else {
+            "tailscale"
+        },
         device_id = device.map(|d| d.device_id.as_str()).unwrap_or("none"),
         "connecting to gateway",
     );
@@ -499,28 +502,6 @@ async fn send_command_rpc(
         .map_err(|e| SessionError::Send(e.to_string()))
 }
 
-#[cfg(test)]
-mod command_rpc_tests {
-    use super::*;
-
-    #[test]
-    fn resolve_approval_frame_matches_gateway_schema() {
-        let cmd = GatewayCommand::ResolveApproval {
-            id: "abc-123".into(),
-            decision: "allow-once".into(),
-        };
-        let (method, frame) = build_command_frame(42, &cmd);
-        assert_eq!(method, "exec.approval.resolve");
-        // Matches OpenClaw's `validateExecApprovalResolveParams`
-        // (server-methods/exec-approval.ts:332) — `{id, decision}`.
-        assert_eq!(frame["type"], "req");
-        assert_eq!(frame["id"], "42");
-        assert_eq!(frame["method"], "exec.approval.resolve");
-        assert_eq!(frame["params"]["id"], "abc-123");
-        assert_eq!(frame["params"]["decision"], "allow-once");
-    }
-}
-
 async fn send_rpc(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -624,7 +605,9 @@ async fn handle_event(
     match event {
         // Scope-free: push delta for a single cron job.
         "cron" => {
-            let Some(payload) = payload else { return Ok(()) };
+            let Some(payload) = payload else {
+                return Ok(());
+            };
             let mut evt: CronEventPayload = match serde_json::from_value(payload.clone()) {
                 Ok(e) => e,
                 Err(e) => {
@@ -636,10 +619,10 @@ async fn handle_event(
             // apply_status_update lands on the right agent. Falls
             // back to the raw UUID only if we haven't seen the
             // snapshot yet (first few events after connect).
-            if evt.job_name.is_none() {
-                if let Some(name) = cron_id_to_name.get(&evt.job_id) {
-                    evt.job_name = Some(name.clone());
-                }
+            if evt.job_name.is_none()
+                && let Some(name) = cron_id_to_name.get(&evt.job_id)
+            {
+                evt.job_name = Some(name.clone());
             }
             tracing::debug!(
                 job_id = %evt.job_id,
@@ -662,13 +645,18 @@ async fn handle_event(
         // duplicate bubbles on the internal-channel path. Keep this as
         // a trace-level observation of agent delta streaming.
         "chat" => {
-            tracing::trace!(?payload, "chat event (not rendered — using session.message)");
+            tracing::trace!(
+                ?payload,
+                "chat event (not rendered — using session.message)"
+            );
         }
 
         // Scope-free: agent run stream (tool-call phases, lifecycle).
         // Surfaces as activity nudges, not text.
         "agent" => {
-            let Some(payload) = payload else { return Ok(()) };
+            let Some(payload) = payload else {
+                return Ok(());
+            };
             let evt: AgentEventPayload = match serde_json::from_value(payload.clone()) {
                 Ok(e) => e,
                 Err(e) => {
@@ -693,7 +681,9 @@ async fn handle_event(
         // This is the path that surfaces Slack-routed conversations
         // onto the office scene.
         "session.message" => {
-            let Some(payload) = payload else { return Ok(()) };
+            let Some(payload) = payload else {
+                return Ok(());
+            };
             let role = payload
                 .get("message")
                 .and_then(|m| m.get("role"))
@@ -761,7 +751,9 @@ async fn handle_event(
             // generic "tool-calling" indicator. Multiple tool events
             // fire per invocation (start/output/done); we render a
             // bubble only on `phase == "start"` to avoid flashing.
-            let Some(payload) = payload else { return Ok(()) };
+            let Some(payload) = payload else {
+                return Ok(());
+            };
             let data = payload.get("data");
             let phase = data
                 .and_then(|d| d.get("phase"))
@@ -785,7 +777,9 @@ async fn handle_event(
 
         // Scoped (APPROVALS_SCOPE): exec approvals for the operator.
         "exec.approval.requested" => {
-            let Some(payload) = payload else { return Ok(()) };
+            let Some(payload) = payload else {
+                return Ok(());
+            };
             match serde_json::from_value::<ApprovalEventPayload>(payload.clone()) {
                 Ok(p) => {
                     let _ = out.send(WsEvent::ApprovalRequested(p)).await;
@@ -805,7 +799,9 @@ async fn handle_event(
         // `openclaw/src/gateway/events.ts:5`):
         // `{ updateAvailable: { currentVersion, latestVersion, channel } | null }`.
         "update.available" => {
-            let Some(payload) = payload else { return Ok(()) };
+            let Some(payload) = payload else {
+                return Ok(());
+            };
             let update = payload.get("updateAvailable");
             let parsed = update.and_then(|u| {
                 // null clears; an object populates.
@@ -876,7 +872,10 @@ fn extract_message_text(payload: &Value) -> String {
             if kind != "text" {
                 return None;
             }
-            chunk.get("text").and_then(Value::as_str).map(str::to_string)
+            chunk
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
         })
         .collect::<Vec<_>>()
         .join("")
@@ -974,4 +973,26 @@ fn try_main_agent(v: &Value) -> Option<MainAgent> {
         }
     }
     serde_json::from_value::<MainAgent>(v.clone()).ok()
+}
+
+#[cfg(test)]
+mod command_rpc_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_approval_frame_matches_gateway_schema() {
+        let cmd = GatewayCommand::ResolveApproval {
+            id: "abc-123".into(),
+            decision: "allow-once".into(),
+        };
+        let (method, frame) = build_command_frame(42, &cmd);
+        assert_eq!(method, "exec.approval.resolve");
+        // Matches OpenClaw's `validateExecApprovalResolveParams`
+        // (server-methods/exec-approval.ts:332) — `{id, decision}`.
+        assert_eq!(frame["type"], "req");
+        assert_eq!(frame["id"], "42");
+        assert_eq!(frame["method"], "exec.approval.resolve");
+        assert_eq!(frame["params"]["id"], "abc-123");
+        assert_eq!(frame["params"]["decision"], "allow-once");
+    }
 }

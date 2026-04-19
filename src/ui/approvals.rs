@@ -27,8 +27,11 @@ pub fn view<'a>(
         .map(row_for)
         .fold(column![].spacing(6), |acc, el| acc.push(el));
 
-    let body: iced::widget::Column<'a, Message> =
-        column![text("Pending approvals").size(12).color(*theme::MUTED), rows,].spacing(8);
+    let body: iced::widget::Column<'a, Message> = column![
+        text("Pending approvals").size(12).color(*theme::MUTED),
+        rows,
+    ]
+    .spacing(8);
 
     container(body)
         .width(Length::Fill)
@@ -70,12 +73,7 @@ fn row_for<'a>(entry: (&'a String, &'a ApprovalEventPayload)) -> Element<'a, Mes
             decision: "deny",
         });
 
-    row![
-        header,
-        Space::new().width(Length::Fill),
-        allow,
-        deny
-    ]
+    row![header, Space::new().width(Length::Fill), allow, deny]
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill)

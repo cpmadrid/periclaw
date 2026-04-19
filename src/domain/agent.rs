@@ -119,8 +119,7 @@ fn ghost_palette() -> [Color; 4] {
 
 // Lazy: recompute on every color() call. Cheap (4 Color clones, no lock).
 #[allow(non_upper_case_globals)]
-static GHOST_PALETTE: std::sync::LazyLock<[Color; 4]> =
-    std::sync::LazyLock::new(ghost_palette);
+static GHOST_PALETTE: std::sync::LazyLock<[Color; 4]> = std::sync::LazyLock::new(ghost_palette);
 
 fn stable_index(id: &str, modulus: usize) -> usize {
     // djb2 — tiny hash, no dep, deterministic across runs.

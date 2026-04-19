@@ -19,17 +19,11 @@ pub enum WsEvent {
     /// Main agent status update.
     MainAgent(MainAgent),
     /// Real agent chat text — feed directly into a thought bubble.
-    AgentMessage {
-        agent_id: AgentId,
-        text: String,
-    },
+    AgentMessage { agent_id: AgentId, text: String },
     /// Tool-invocation text (e.g. `⚙ exec`) — spawns a distinctly
     /// styled bubble so the operator can tell tool calls apart from
     /// conversational messages.
-    AgentToolInvoked {
-        agent_id: AgentId,
-        text: String,
-    },
+    AgentToolInvoked { agent_id: AgentId, text: String },
     /// Agent activity signal (tool call started, errored, etc.) without
     /// new text. Used to nudge the sprite's animation state.
     AgentActivity {
@@ -49,9 +43,7 @@ pub enum WsEvent {
     /// Pending exec approval requires operator attention.
     ApprovalRequested(ApprovalEventPayload),
     /// Previously-pending approval has resolved (granted/denied).
-    ApprovalResolved {
-        id: Option<String>,
-    },
+    ApprovalResolved { id: Option<String> },
     /// Gateway-side update notification (or `None` to clear an
     /// earlier notification). Surfaces `current → latest` in the
     /// status bar so the operator sees they can upgrade.
@@ -138,10 +130,7 @@ pub fn cron_job_from_event(evt: &CronEventPayload) -> Option<CronJob> {
     // UUID→name cache) so the roster match succeeds. Falls back to
     // the UUID so the log/UI still shows *something* before the
     // initial snapshot lands.
-    let name = evt
-        .job_name
-        .clone()
-        .unwrap_or_else(|| evt.job_id.clone());
+    let name = evt.job_name.clone().unwrap_or_else(|| evt.job_id.clone());
     match evt.action.as_str() {
         "started" => Some(CronJob {
             name,
@@ -243,9 +232,18 @@ mod tests {
 
     #[test]
     fn agent_stream_mapping() {
-        assert_eq!(agent_stream_to_activity("tool"), Some(ActivityKind::ToolCalling));
-        assert_eq!(agent_stream_to_activity("item"), Some(ActivityKind::Thinking));
-        assert_eq!(agent_stream_to_activity("error"), Some(ActivityKind::Errored));
+        assert_eq!(
+            agent_stream_to_activity("tool"),
+            Some(ActivityKind::ToolCalling)
+        );
+        assert_eq!(
+            agent_stream_to_activity("item"),
+            Some(ActivityKind::Thinking)
+        );
+        assert_eq!(
+            agent_stream_to_activity("error"),
+            Some(ActivityKind::Errored)
+        );
         assert_eq!(agent_stream_to_activity("assistant"), None);
         assert_eq!(agent_stream_to_activity("lifecycle"), None);
     }

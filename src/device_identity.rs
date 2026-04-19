@@ -227,9 +227,9 @@ fn decode_signing_key(seed_b64url: &str) -> Result<SigningKey, IdentityError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(seed_b64url)
         .map_err(|e| IdentityError::Malformed(format!("base64 decode: {e}")))?;
-    let seed: [u8; 32] = bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| IdentityError::Malformed(format!("expected 32 bytes, got {}", v.len())))?;
+    let seed: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        IdentityError::Malformed(format!("expected 32 bytes, got {}", v.len()))
+    })?;
     Ok(SigningKey::from_bytes(&seed))
 }
 

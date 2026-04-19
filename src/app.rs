@@ -30,7 +30,10 @@ pub enum Message {
     /// decision string matches OpenClaw's `ExecApprovalDecision`
     /// (`"allow-once" | "deny"` — `allow-always` intentionally not
     /// surfaced from the desktop to keep blast radius low).
-    ResolveApproval { id: String, decision: &'static str },
+    ResolveApproval {
+        id: String,
+        decision: &'static str,
+    },
 }
 
 pub struct App {
@@ -103,9 +106,12 @@ impl App {
                 // fails, the operator can retry when/if the event
                 // re-fires (real rare case).
                 self.pending_approvals.remove(&id);
-                if let Err(e) = crate::net::commands::sender()
-                    .send(crate::net::commands::GatewayCommand::ResolveApproval { id, decision: decision.to_string() })
-                {
+                if let Err(e) = crate::net::commands::sender().send(
+                    crate::net::commands::GatewayCommand::ResolveApproval {
+                        id,
+                        decision: decision.to_string(),
+                    },
+                ) {
                     tracing::warn!(error = %e, "could not dispatch ResolveApproval command");
                 }
             }
@@ -187,8 +193,7 @@ impl App {
                         preview = %snippet,
                         "agent message → bubble",
                     );
-                    self.bubbles
-                        .push(ThoughtBubble::message(agent_id, snippet));
+                    self.bubbles.push(ThoughtBubble::message(agent_id, snippet));
                 }
             }
             WsEvent::AgentToolInvoked { agent_id, text } => {
