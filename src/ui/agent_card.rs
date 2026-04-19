@@ -56,7 +56,12 @@ fn card<'a>(agent: &'a Agent, status: AgentStatus) -> Element<'a, Message> {
             ..Default::default()
         });
 
-    let header = row![dot, text(agent.display).size(13).color(*theme::FOREGROUND),]
+    let header = row![
+        dot,
+        text(agent.display.as_str())
+            .size(13)
+            .color(*theme::FOREGROUND),
+    ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
 

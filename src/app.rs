@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use iced::widget::{Canvas, canvas};
 use iced::{Element, Length, Subscription, time};
 
-use crate::domain::{Agent, AgentId, AgentStatus, agent};
+use crate::domain::{Agent, AgentId, AgentKind, AgentStatus, agent};
 use crate::net::events::ActivityKind;
 use crate::net::rpc::ApprovalEventPayload;
 use crate::net::{WsEvent, events, mock, openclaw};
@@ -51,7 +51,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             nav: NavItem::Overview,
-            roster: agent::roster(),
+            roster: agent::seed_roster(),
             statuses: HashMap::new(),
             bubbles: Vec::new(),
             active_model: None,
@@ -105,6 +105,7 @@ impl App {
                 self.last_poll = Some(Instant::now());
                 for cron in &crons {
                     let id = events::cron_agent_id(cron);
+                    self.ensure_agent(&id, AgentKind::Cron);
                     let status = events::cron_status(cron);
                     self.apply_status_update(id, status);
                 }
@@ -112,6 +113,7 @@ impl App {
             WsEvent::CronDelta(cron) => {
                 self.last_poll = Some(Instant::now());
                 let id = events::cron_agent_id(&cron);
+                self.ensure_agent(&id, AgentKind::Cron);
                 let status = events::cron_status(&cron);
                 self.apply_status_update(id, status);
             }
@@ -119,6 +121,7 @@ impl App {
                 self.last_poll = Some(Instant::now());
                 for ch in &channels {
                     let id = events::channel_agent_id(ch);
+                    self.ensure_agent(&id, AgentKind::Channel);
                     let status = events::channel_status(ch);
                     self.apply_status_update(id, status);
                 }
@@ -182,6 +185,28 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Ensure a sprite exists in the roster for `id`. First-time seen
+    /// IDs (cron rename on the gateway, a new channel provider) get a
+    /// fresh `Agent` with a deterministic color and the canvas cache is
+    /// cleared so the sprite is painted this frame.
+    fn ensure_agent(&mut self, id: &AgentId, kind: AgentKind) {
+        if self.roster.iter().any(|a| a.id == *id) {
+            return;
+        }
+        let agent = match kind {
+            AgentKind::Cron => Agent::cron(id.as_str()),
+            AgentKind::Channel => Agent::channel(id.as_str()),
+            AgentKind::Main => {
+                // `main` is already in the seed roster; any drift is a bug.
+                tracing::warn!(id = %id.as_str(), "unexpected Main agent add");
+                return;
+            }
+        };
+        tracing::info!(id = %id.as_str(), kind = ?kind, "roster: new agent");
+        self.roster.push(agent);
+        self.scene_cache.clear();
     }
 
     fn apply_status_update(&mut self, id: AgentId, next: AgentStatus) {

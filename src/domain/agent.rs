@@ -1,9 +1,8 @@
-//! The static roster of agents depicted in the Agent Office.
+//! The roster of agents depicted in the Agent Office.
 //!
-//! Names come directly from the live OpenClaw setup on ubu-3xdv:
-//! - Cron jobs from `~/.openclaw/cron/jobs.json`
-//! - The single `main` agent from `agents.list[]` in openclaw.json
-//! - Channels from `channels.{slack,telegram,whatsapp}` in openclaw.json
+//! Only the `main` agent is seeded at startup; cron and channel entries
+//! are populated live from the gateway's `cron.list` / `channels.status`
+//! snapshots so renames or additions on ubu-3xdv surface immediately.
 
 use iced::Color;
 
@@ -38,81 +37,96 @@ pub enum AgentKind {
 #[derive(Debug, Clone)]
 pub struct Agent {
     pub id: AgentId,
-    /// Short label displayed under the sprite (e.g. "zpool", "velovate-sync").
-    pub display: &'static str,
+    /// Short label displayed under the sprite. Derived from the gateway's
+    /// name for dynamic entries; hand-set for the `main` seed.
+    pub display: String,
     pub kind: AgentKind,
 }
 
 impl Agent {
+    pub fn cron(id: impl Into<String>) -> Self {
+        let id: String = id.into();
+        let display = shorten_for_display(&id);
+        Self {
+            id: AgentId::new(id),
+            display,
+            kind: AgentKind::Cron,
+        }
+    }
+
+    pub fn channel(id: impl Into<String>) -> Self {
+        let id: String = id.into();
+        Self {
+            id: AgentId::new(id.clone()),
+            display: id,
+            kind: AgentKind::Channel,
+        }
+    }
+
     pub fn color(&self) -> Color {
-        // Sprite colors per the Pac-Man homage — each cron gets its own
-        // ghost color, main is the signature green, channels are dimmer.
-        match self.id.as_str() {
-            // Inky-blue observatory dweller
-            "zpool-health-check" => *theme::STATUS_UP,
-            // Pinky, a little pink/magenta
-            "openclaw-auto-update" => *theme::STATUS_DEGRADED,
-            // Winky (our version) — the sync worker
-            "teamapp-velovate-sync-hourly" => *theme::TERMINAL_GREEN,
-            // Clyde the digester
-            "velovate-weekly-digest" => *theme::STATUS_UNKNOWN,
-            // Main is the signature green, brightest
-            "main" => *theme::TERMINAL_GREEN,
-            // Channels dim by default
-            _ => *theme::MUTED,
+        // Main is the signature bright green; everything else gets a
+        // deterministic ghost color derived from the id so renames stay
+        // visually stable and new crons/channels don't all share one hue.
+        if self.id.as_str() == "main" {
+            return *theme::TERMINAL_GREEN;
+        }
+        match self.kind {
+            AgentKind::Main => *theme::TERMINAL_GREEN,
+            AgentKind::Cron => GHOST_PALETTE[stable_index(self.id.as_str(), GHOST_PALETTE.len())],
+            AgentKind::Channel => *theme::MUTED,
         }
     }
 }
 
-/// The canonical roster — the list of sprites that will be rendered.
-///
-/// Keeping this static (not derived from a gateway call) for v1 because
-/// the set of agents is small and slow-changing. If you add a cron on
-/// ubu-3xdv, update this list and recompile.
-pub fn roster() -> Vec<Agent> {
-    vec![
-        // Cron jobs
-        Agent {
-            id: AgentId::new("zpool-health-check"),
-            display: "zpool",
-            kind: AgentKind::Cron,
-        },
-        Agent {
-            id: AgentId::new("openclaw-auto-update"),
-            display: "auto-update",
-            kind: AgentKind::Cron,
-        },
-        Agent {
-            id: AgentId::new("teamapp-velovate-sync-hourly"),
-            display: "velovate-sync",
-            kind: AgentKind::Cron,
-        },
-        Agent {
-            id: AgentId::new("velovate-weekly-digest"),
-            display: "weekly-digest",
-            kind: AgentKind::Cron,
-        },
-        // Main agent
-        Agent {
-            id: AgentId::new("main"),
-            display: "main",
-            kind: AgentKind::Main,
-        },
-        // Channels
-        Agent {
-            id: AgentId::new("slack"),
-            display: "slack",
-            kind: AgentKind::Channel,
-        },
-        Agent {
-            id: AgentId::new("telegram"),
-            display: "telegram",
-            kind: AgentKind::Channel,
-        },
-        Agent {
-            id: AgentId::new("whatsapp"),
-            display: "whatsapp",
-            kind: AgentKind::Channel,
-        },
+/// Seed roster — just `main`. Cron and channel sprites are added
+/// dynamically as their first snapshot event arrives.
+pub fn seed_roster() -> Vec<Agent> {
+    vec![Agent {
+        id: AgentId::new("main"),
+        display: "main".to_string(),
+        kind: AgentKind::Main,
+    }]
+}
+
+/// Collapse boilerplate prefixes/suffixes off long cron names so the
+/// display label stays readable under the sprite. Examples:
+///   `teamapp-velovate-sync-hourly` → `velovate-sync-hourly`
+///   `openclaw-auto-update`         → `auto-update`
+///   `zpool-health-check`           → `zpool-health-check`
+fn shorten_for_display(id: &str) -> String {
+    const PREFIXES: &[&str] = &["teamapp-", "openclaw-"];
+    let mut s = id;
+    for p in PREFIXES {
+        if let Some(rest) = s.strip_prefix(p) {
+            s = rest;
+            break;
+        }
+    }
+    s.to_string()
+}
+
+/// Pac-Man ghost palette — four classic ghost hues drawn from the
+/// theme. `stable_index` hashes the id into this table so the same
+/// cron always gets the same ghost.
+fn ghost_palette() -> [Color; 4] {
+    [
+        *theme::STATUS_UP,
+        *theme::STATUS_DEGRADED,
+        *theme::TERMINAL_GREEN,
+        *theme::STATUS_UNKNOWN,
     ]
+}
+
+// Lazy: recompute on every color() call. Cheap (4 Color clones, no lock).
+#[allow(non_upper_case_globals)]
+static GHOST_PALETTE: std::sync::LazyLock<[Color; 4]> =
+    std::sync::LazyLock::new(ghost_palette);
+
+fn stable_index(id: &str, modulus: usize) -> usize {
+    // djb2 — tiny hash, no dep, deterministic across runs.
+    let mut h: u64 = 5381;
+    for b in id.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    (h as usize) % modulus.max(1)
 }

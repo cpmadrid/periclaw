@@ -686,12 +686,63 @@ fn try_cron_list(v: &Value) -> Option<Vec<CronJob>> {
 }
 
 fn try_channel_list(v: &Value) -> Option<Vec<Channel>> {
-    let candidate = v.get("channels").or(Some(v))?;
-    let list: Vec<Channel> = serde_json::from_value(candidate.clone()).ok()?;
-    if list.iter().any(|c| c.name.is_empty()) {
-        return None;
+    // Only accept payloads that explicitly carry a `channels` key — a
+    // looser match (e.g. treating the whole payload as a map) picks up
+    // unrelated RPC responses like `{subscribed: true}`.
+    let candidate = v.get("channels")?;
+
+    // Shape A: bare array of `{name, enabled, connected, ...}`.
+    if candidate.is_array() {
+        let list: Vec<Channel> = serde_json::from_value(candidate.clone()).ok()?;
+        if list.iter().any(|c| c.name.is_empty()) {
+            return None;
+        }
+        return Some(list);
     }
-    Some(list)
+
+    // Shape B: map keyed by provider name, as emitted by `channels.status`
+    // (`{ "slack": {configured, running, lastError, ...}, ... }`). Fields
+    // don't include `name`/`enabled`/`connected` directly — synthesize
+    // them from `configured` (enabled) and `running` + `lastError`
+    // (connected) so the desktop's roster + status mapping keep working.
+    let obj = candidate.as_object()?;
+    let order = v
+        .get("channelOrder")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| obj.keys().cloned().collect());
+
+    let channels = order
+        .iter()
+        .filter_map(|name| {
+            let entry = obj.get(name)?;
+            let enabled = entry
+                .get("configured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let running = entry
+                .get("running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let last_error = entry
+                .get("lastError")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some(Channel {
+                name: name.clone(),
+                enabled,
+                connected: running && last_error.is_none(),
+                last_error,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    (!channels.is_empty()).then_some(channels)
 }
 
 fn try_main_agent(v: &Value) -> Option<MainAgent> {
