@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use iced::widget::{column, container, row, scrollable, text};
-use iced::{Border, Element, Length, Padding};
+use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::{Alignment, Border, Element, Length, Padding};
 
 use crate::Message;
 use crate::app::SessionUsage;
@@ -25,6 +25,10 @@ pub struct AgentsViewSnapshot<'a> {
     pub roster: &'a [Agent],
     pub statuses: &'a HashMap<AgentId, AgentStatus>,
     pub cron_details: &'a HashMap<AgentId, CronState>,
+    /// UUIDs keyed by AgentId for crons that came from the snapshot.
+    /// Used to gate the "Run" button — if we don't know the id we
+    /// can't fire `cron.run`, so the button stays hidden.
+    pub cron_ids: &'a HashMap<AgentId, String>,
     pub channel_details: &'a HashMap<AgentId, Channel>,
     pub active_model: Option<&'a str>,
     pub session_usage: &'a HashMap<String, SessionUsage>,
@@ -99,7 +103,23 @@ fn agent_row<'a>(agent: &'a Agent, snap: &AgentsViewSnapshot<'a>) -> Element<'a,
             ..Default::default()
         });
 
-    let header = row![
+    // Crons with a known UUID get a "Run now" button. Hidden for
+    // crons we haven't seen in a snapshot yet (no UUID on hand to
+    // pass to `cron.run`), and for other agent kinds where the
+    // concept doesn't apply.
+    let run_button: Option<Element<'a, Message>> =
+        if matches!(agent.kind, AgentKind::Cron) && snap.cron_ids.contains_key(&agent.id) {
+            Some(
+                button(text("Run now").size(11))
+                    .padding(Padding::from([4, 10]))
+                    .on_press(Message::RunCron(agent.id.clone()))
+                    .into(),
+            )
+        } else {
+            None
+        };
+
+    let mut header = row![
         dot,
         text(agent.display.as_str())
             .size(14)
@@ -107,11 +127,14 @@ fn agent_row<'a>(agent: &'a Agent, snap: &AgentsViewSnapshot<'a>) -> Element<'a,
         text(format!("{:?}", agent.kind).to_lowercase())
             .size(11)
             .color(*theme::MUTED),
-        iced::widget::Space::new().width(Length::Fill),
-        badge,
+        Space::new().width(Length::Fill),
     ]
     .spacing(10)
-    .align_y(iced::Alignment::Center);
+    .align_y(Alignment::Center);
+    if let Some(btn) = run_button {
+        header = header.push(btn);
+    }
+    header = header.push(badge);
 
     let detail_lines = match agent.kind {
         AgentKind::Cron => cron_detail_lines(&agent.id, snap),

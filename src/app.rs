@@ -42,6 +42,9 @@ pub enum Message {
     /// an `on_input` handler to stay interactive/selectable). The
     /// field's contents are discarded.
     InputDiscard(String),
+    /// Fire a cron job immediately. Resolves the AgentId to its
+    /// UUID via `cron_ids`, then dispatches `cron.run` to the WS.
+    RunCron(AgentId),
 }
 
 pub struct App {
@@ -78,6 +81,11 @@ pub struct App {
     /// Populated from both the `cron.list` snapshot and the `cron`
     /// delta stream.
     pub cron_details: HashMap<AgentId, CronState>,
+    /// AgentId → cron UUID. `cron.run` takes the UUID, not the name,
+    /// so the Agents-tab "Run" button needs this to dispatch.
+    /// Populated from the `cron.list` bootstrap snapshot only — push
+    /// deltas carry the id too, but the snapshot is authoritative.
+    pub cron_ids: HashMap<AgentId, String>,
     /// Full channel state per channel agent (connected, configured,
     /// last error). Refreshed by the 30s `channels.status` heartbeat.
     pub channel_details: HashMap<AgentId, Channel>,
@@ -118,6 +126,7 @@ impl Default for App {
             gateway_update: None,
             scope_upgrade_pending: None,
             cron_details: HashMap::new(),
+            cron_ids: HashMap::new(),
             channel_details: HashMap::new(),
             log_lines: VecDeque::with_capacity(2048),
             transition_moments: HashMap::new(),
@@ -162,6 +171,26 @@ impl App {
                 iced::clipboard::write(value)
             }
             Message::InputDiscard(_) => Task::none(),
+            Message::RunCron(agent_id) => {
+                let Some(uuid) = self.cron_ids.get(&agent_id).cloned() else {
+                    tracing::warn!(
+                        id = %agent_id.as_str(),
+                        "RunCron fired for agent without known UUID; ignoring",
+                    );
+                    return Task::none();
+                };
+                tracing::info!(
+                    id = %agent_id.as_str(),
+                    job_id = %uuid,
+                    "UI: cron.run",
+                );
+                if let Err(e) = crate::net::commands::sender()
+                    .send(crate::net::commands::GatewayCommand::RunCron { job_id: uuid })
+                {
+                    tracing::warn!(error = %e, "could not dispatch RunCron command");
+                }
+                Task::none()
+            }
             Message::Tick => {
                 let now = Instant::now();
                 let before = self.bubbles.len();
@@ -201,6 +230,9 @@ impl App {
                     let id = events::cron_agent_id(cron);
                     self.ensure_agent(&id, AgentKind::Cron);
                     self.cron_details.insert(id.clone(), cron.state.clone());
+                    if let Some(uuid) = cron.id.as_deref() {
+                        self.cron_ids.insert(id.clone(), uuid.to_string());
+                    }
                     let status = events::cron_status(cron);
                     self.apply_status_update(id, status);
                 }
@@ -435,6 +467,7 @@ impl App {
                 roster: &self.roster,
                 statuses: &self.statuses,
                 cron_details: &self.cron_details,
+                cron_ids: &self.cron_ids,
                 channel_details: &self.channel_details,
                 active_model: self.active_model.as_deref(),
                 session_usage: &self.session_usage,

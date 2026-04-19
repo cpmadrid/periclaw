@@ -26,6 +26,10 @@ pub enum GatewayCommand {
     /// OpenClaw's `exec.approval.resolve` RPC
     /// (`"allow-once" | "allow-always" | "deny"`).
     ResolveApproval { id: String, decision: String },
+    /// Fire a cron job immediately via `cron.run`. `job_id` is the
+    /// stable UUID (`jobs.json` → `id`), not the human-readable name
+    /// — the RPC validates against the id.
+    RunCron { job_id: String },
 }
 
 struct Channel {

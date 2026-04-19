@@ -308,14 +308,12 @@ async fn session(
     let client_id = "openclaw-tui";
     let client_mode = "ui";
     let role = "operator";
-    // Request approvals scope alongside read so
-    // `exec.approval.resolve` RPC calls from the UI actually land. If
-    // the paired device record doesn't yet cover approvals, the
-    // gateway responds `NOT_PAIRED` with `reason: "scope-upgrade"` —
-    // we detect that below and back off long + surface the requestId
-    // in the UI instead of hot-reconnecting (which dedups into one
-    // pair entry, but leaves the app permanently disconnected).
-    let scopes: &[&str] = &["operator.read", "operator.approvals"];
+    // read (events + snapshots), approvals (Allow/Deny resolves
+    // actually land), admin (firing `cron.run` from the UI). On a
+    // device not yet paired to the richer scope set the gateway
+    // returns `NOT_PAIRED` with `reason: "scope-upgrade"` — handled
+    // below with a long backoff + visible notice in the UI.
+    let scopes: &[&str] = &["operator.read", "operator.approvals", "operator.admin"];
     let mut params_obj = json!({
         "minProtocol": 3,
         "maxProtocol": 3,
@@ -583,6 +581,12 @@ fn build_command_frame(id: u64, cmd: &GatewayCommand) -> (&'static str, Value) {
         } => (
             "exec.approval.resolve",
             json!({ "id": approval_id, "decision": decision }),
+        ),
+        GatewayCommand::RunCron { job_id } => (
+            "cron.run",
+            // `mode: "force"` matches the CLI default — fire the job
+            // now regardless of schedule.
+            json!({ "id": job_id, "mode": "force" }),
         ),
     };
     let frame = json!({
