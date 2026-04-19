@@ -88,45 +88,6 @@ pub struct CronEventPayload {
     pub next_run_at_ms: Option<i64>,
 }
 
-/// Gateway broadcast `chat` event. Shape from
-/// `openclaw/src/gateway/server-chat.ts` chat-delta/-final/-error payloads.
-///
-/// We only care about the final assistant text for thought bubbles; delta
-/// streams are noisy and the app doesn't render per-token.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChatEventPayload {
-    /// `"delta" | "final" | "error"`.
-    pub state: String,
-    #[serde(default)]
-    pub message: Option<ChatMessage>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChatMessage {
-    #[serde(default)]
-    pub content: Vec<ChatContent>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChatContent {
-    #[serde(default, rename = "type")]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub text: Option<String>,
-}
-
-impl ChatMessage {
-    /// Concatenate all `text`-type content parts into a single string.
-    pub fn plain_text(&self) -> String {
-        self.content
-            .iter()
-            .filter(|c| c.kind.as_deref() == Some("text"))
-            .filter_map(|c| c.text.as_deref())
-            .collect::<Vec<_>>()
-            .join("")
-    }
-}
-
 /// Gateway broadcast `agent` event. Shape from
 /// `openclaw/src/gateway/server-chat.ts` agent-run stream payloads.
 ///
@@ -201,36 +162,6 @@ mod tests {
         let json = r#"{ "name": "slack", "enabled": true, "connected": true }"#;
         let ch: Channel = serde_json::from_str(json).unwrap();
         assert!(ch.enabled && ch.connected);
-    }
-
-    #[test]
-    fn chat_final_extracts_text() {
-        // Payload shape cribbed from server-chat.ts:841 (chat final).
-        let json = r#"
-        {
-            "runId": "r1",
-            "sessionKey": "s1",
-            "seq": 12,
-            "state": "final",
-            "message": {
-                "role": "assistant",
-                "content": [{"type":"text","text":"done thinking"}],
-                "timestamp": 1776440000000
-            }
-        }
-        "#;
-        let evt: ChatEventPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(evt.state, "final");
-        assert_eq!(evt.message.unwrap().plain_text(), "done thinking");
-    }
-
-    #[test]
-    fn chat_final_without_message_is_empty() {
-        // `state:"final"` with no `message` is the suppressed-silent case
-        // — server emits the envelope but no text.
-        let json = r#"{"runId":"r","sessionKey":"s","seq":1,"state":"final"}"#;
-        let evt: ChatEventPayload = serde_json::from_str(json).unwrap();
-        assert!(evt.message.is_none());
     }
 
     #[test]

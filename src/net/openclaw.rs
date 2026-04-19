@@ -67,8 +67,7 @@ use crate::net::events::{
     ActivityKind, agent_stream_to_activity, cron_job_from_event,
 };
 use crate::net::rpc::{
-    AgentEventPayload, ApprovalEventPayload, Channel, ChatEventPayload, CronEventPayload,
-    CronJob, MainAgent,
+    AgentEventPayload, ApprovalEventPayload, Channel, CronEventPayload, CronJob, MainAgent,
 };
 
 /// Cadence of the channel-status heartbeat RPC. Channels are not yet
@@ -84,11 +83,6 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// route by the event's `sessionKey` instead.
 const CHAT_AGENT_ID: &str = "main";
 
-/// Heuristic: `wss://<host>.ts.net/...` is a Tailscale Serve URL, which
-/// adds whois headers the gateway trusts when `allowTailscale: true`.
-fn is_tailscale_serve_url(url: &str) -> bool {
-    url.starts_with("wss://") && url.contains(".ts.net")
-}
 
 /// Iced subscription stream for the real gateway.
 ///
@@ -366,6 +360,14 @@ async fn session(
     let mut cron_id_to_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
+    // Recently-rendered session.message ids. OpenClaw emits two
+    // updates per assistant turn (initial insert + metadata attach),
+    // both carrying the same messageId — dedup client-side so the
+    // bubble only spawns once. Bounded so it can't grow unbounded
+    // on a long session.
+    let mut seen_message_ids: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(32);
+
     // Channel state isn't broadcast as a push event, so we refresh it
     // on a low-cadence heartbeat over the same socket. No cron poll —
     // the gateway's `cron` broadcast covers that live.
@@ -381,7 +383,7 @@ async fn session(
             msg = socket.next() => {
                 match msg {
                     Some(Ok(WsMsg::Text(txt))) => {
-                        handle_frame(&txt, out, &mut cron_id_to_name).await?;
+                        handle_frame(&txt, out, &mut cron_id_to_name, &mut seen_message_ids).await?;
                     }
                     Some(Ok(WsMsg::Ping(p))) => {
                         let _ = socket.send(WsMsg::Pong(p)).await;
@@ -420,6 +422,7 @@ async fn handle_frame(
     txt: &str,
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
     cron_id_to_name: &mut std::collections::HashMap<String, String>,
+    seen_message_ids: &mut std::collections::VecDeque<String>,
 ) -> Result<(), SessionError> {
     let frame: Value = serde_json::from_str(txt)?;
 
@@ -464,7 +467,7 @@ async fn handle_frame(
         Some("event") => {
             let event = frame.get("event").and_then(Value::as_str).unwrap_or("?");
             let payload = frame.get("payload");
-            handle_event(event, payload, out, cron_id_to_name).await?;
+            handle_event(event, payload, out, cron_id_to_name, seen_message_ids).await?;
         }
         other => {
             tracing::trace!(?other, raw = %txt, "unknown frame type");
@@ -479,6 +482,7 @@ async fn handle_event(
     payload: Option<&Value>,
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
     cron_id_to_name: &std::collections::HashMap<String, String>,
+    seen_message_ids: &mut std::collections::VecDeque<String>,
 ) -> Result<(), SessionError> {
     match event {
         // Scope-free: push delta for a single cron job.
@@ -515,35 +519,13 @@ async fn handle_event(
             // job set drifts from the static roster.
         }
 
-        // Scope-free: chat output from the main agent. We only surface
-        // `final` assistant text as a thought bubble — deltas are noisy
-        // and the app doesn't render per-token.
+        // Scope-free `chat` event. We *could* render bubbles from this
+        // stream too, but `session.message` (scoped, below) covers both
+        // internal and external channels — handling both causes
+        // duplicate bubbles on the internal-channel path. Keep this as
+        // a trace-level observation of agent delta streaming.
         "chat" => {
-            let Some(payload) = payload else { return Ok(()) };
-            let evt: ChatEventPayload = match serde_json::from_value(payload.clone()) {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::trace!(error = %e, "chat event parse failed");
-                    return Ok(());
-                }
-            };
-            if evt.state != "final" {
-                return Ok(());
-            }
-            let Some(msg) = evt.message.as_ref() else {
-                return Ok(());
-            };
-            let text = msg.plain_text();
-            if text.trim().is_empty() {
-                return Ok(());
-            }
-            tracing::debug!(len = text.len(), "chat final");
-            let _ = out
-                .send(WsEvent::AgentMessage {
-                    agent_id: AgentId::new(CHAT_AGENT_ID),
-                    text,
-                })
-                .await;
+            tracing::trace!(?payload, "chat event (not rendered — using session.message)");
         }
 
         // Scope-free: agent run stream (tool-call phases, lifecycle).
@@ -584,6 +566,29 @@ async fn handle_event(
                 // Skip user / system / tool messages — we're surfacing
                 // agent output, not operator input.
                 return Ok(());
+            }
+            // OpenClaw fires `session.message` twice per assistant turn
+            // (initial insert + metadata finalize); both carry the
+            // same messageId. Skip duplicates so the bubble renders
+            // once. When the id is missing we fall through — rare,
+            // and at worst one extra bubble for that turn.
+            if let Some(mid) = payload
+                .get("messageId")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    payload
+                        .get("message")
+                        .and_then(|m| m.get("id"))
+                        .and_then(Value::as_str)
+                })
+            {
+                if seen_message_ids.iter().any(|s| s == mid) {
+                    return Ok(());
+                }
+                seen_message_ids.push_back(mid.to_string());
+                if seen_message_ids.len() > 32 {
+                    seen_message_ids.pop_front();
+                }
             }
             let text = extract_message_text(payload);
             if text.trim().is_empty() {
