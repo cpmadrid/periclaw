@@ -21,8 +21,17 @@ tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 # Pinned to match tokio-tungstenite's rustls; `ring` is the crypto
 # backend we install at startup (see main.rs).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Device pairing (Ed25519 keypair + signed challenges).
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
 futures-util = "0.3"
-keyring = "3"
+# `keyring` v3 is a no-op mock without an explicit backend feature —
+# pick the native OS keychain on each platform so device keys and the
+# gateway token actually persist across launches.
+keyring = { version = "3", features = ["apple-native", "linux-native-sync-persistent", "windows-native"] }
 directories = "6"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"

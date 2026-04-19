@@ -61,6 +61,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 use crate::config;
+use crate::device_identity::{DeviceIdentity, SignConnectParams};
 use crate::domain::AgentId;
 use crate::net::WsEvent;
 use crate::net::events::{
@@ -78,6 +79,16 @@ const CHANNEL_HEARTBEAT: Duration = Duration::from_secs(30);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Milliseconds since the UNIX epoch — the format `signedAtMs` in
+/// the device-auth payload expects. Falls back to zero if the system
+/// clock is somehow behind the epoch (it isn't, but the cast is safer).
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// The agent we attribute chat/agent events to. Today the roster has
 /// exactly one LLM agent (`main`), so all chat text is necessarily
 /// from it. When the desktop grows a multi-agent roster this should
@@ -92,13 +103,6 @@ const CHAT_AGENT_ID: &str = "main";
 pub fn connect() -> impl Stream<Item = WsEvent> {
     stream::channel(64, async move |mut out| {
         let gateway_url = config::gateway_url();
-        // Always send the token if we have one — the gateway's
-        // `auth.mode: "token"` requires it even for Control-UI clients
-        // bypassing device-identity via `dangerouslyDisableDeviceAuth`
-        // (bypass covers pairing, not shared-secret). Tailscale Serve
-        // path still carries the token cleanly; no mismatch because
-        // we're sending the same value the Control UI uses (stored
-        // server-side as `gateway.auth.token`, resolved from env/refs).
         let token = config::try_load_token();
 
         let instance_id = config::instance_id().unwrap_or_else(|e| {
@@ -106,10 +110,30 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
             uuid::Uuid::new_v4().to_string()
         });
 
+        // Load (or mint on first run) the Ed25519 device identity
+        // used to sign the connect challenge. Pairing is driven via
+        // Control UI — this crate just presents the public key and
+        // signs the nonce.
+        let device = match DeviceIdentity::load_or_create() {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(error = %e, "device identity unavailable; connect will rely on bypass flag");
+                None
+            }
+        };
+
         let mut backoff = INITIAL_BACKOFF;
 
         loop {
-            match session(token.as_deref(), &gateway_url, &instance_id, &mut out).await {
+            match session(
+                token.as_deref(),
+                &gateway_url,
+                &instance_id,
+                device.as_ref(),
+                &mut out,
+            )
+            .await
+            {
                 Ok(()) => {
                     tracing::warn!("session ended cleanly (unexpected); reconnecting");
                 }
@@ -145,11 +169,13 @@ async fn session(
     token: Option<&str>,
     gateway_url: &str,
     instance_id: &str,
+    device: Option<&DeviceIdentity>,
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
 ) -> Result<(), SessionError> {
     tracing::info!(
         url = gateway_url,
         auth = if token.is_some() { "token" } else { "tailscale" },
+        device_id = device.map(|d| d.device_id.as_str()).unwrap_or("none"),
         "connecting to gateway",
     );
     let mut req = gateway_url
@@ -174,7 +200,7 @@ async fn session(
     // until the client has acknowledged the challenge (verified against the
     // reference client in openclaw/dist/client-*.js).
     let handshake_deadline = Instant::now() + Duration::from_secs(10);
-    let _nonce: String = loop {
+    let nonce: String = loop {
         tokio::select! {
             _ = sleep_until(handshake_deadline) => {
                 return Err(SessionError::HandshakeTimeout);
@@ -216,44 +242,57 @@ async fn session(
         }
     };
 
-    // Step 2: send our connect request. Nonce is received but not echoed —
-    // for token-only auth (no device identity) the reference client omits
-    // `device` entirely. When we have no token, we also omit `auth` —
-    // that flips the gateway into Tailscale-whois auth (auth.ts:577,
-    // `!hasExplicitSharedSecretAuth`).
+    // Step 2: send our connect request with a signed device identity.
+    // `openclaw-tui` + `operator` + `operator.read` is the same shape
+    // the Control UI uses; including a paired device identity means
+    // the `dangerouslyDisableDeviceAuth` bypass flag is no longer
+    // required — proper Ed25519 challenge-response covers the gate.
+    let client_id = "openclaw-tui";
+    let client_mode = "ui";
+    let role = "operator";
+    let scopes: &[&str] = &["operator.read"];
     let mut params_obj = json!({
         "minProtocol": 3,
         "maxProtocol": 3,
         "client": {
-            // OpenClaw recognizes `openclaw-tui` as an operator UI
-            // (`utils/message-channel.ts:52, isOperatorUiClient`). The
-            // mission-control desktop is that: a read-only visualization
-            // surface for an operator. Identifying as TUI (instead of
-            // generic `openclaw-probe`) lets the gateway short-circuit
-            // the device-pairing requirement when
-            // `controlUi.dangerouslyDisableDeviceAuth: true`, without
-            // us needing to implement an Ed25519 pairing handshake yet.
-            "id": "openclaw-tui",
+            "id": client_id,
             "displayName": "Mission Control Desktop",
             "version": env!("CARGO_PKG_VERSION"),
             "platform": std::env::consts::OS,
-            "mode": "ui",
+            "mode": client_mode,
             "instanceId": instance_id,
         },
-        // operator role + `operator.read` scope. When
-        // `controlUi.dangerouslyDisableDeviceAuth: true`, the gateway
-        // preserves self-declared scopes for Control-UI-classified
-        // (TUI) clients without device identity
-        // (`shouldClearUnboundScopesForMissingDeviceIdentity` returns
-        // false when `allowBypass` is true). Grants access to scoped
-        // RPCs (`cron.list`, `channels.status`) and scope-gated
-        // events (`sessions.*`, `exec.approval.*`).
-        "role": "operator",
-        "scopes": ["operator.read"],
+        "role": role,
+        "scopes": scopes,
         "caps": [],
     });
     if let Some(tok) = token {
         params_obj["auth"] = json!({ "token": tok });
+    }
+    if let Some(dev) = device {
+        // Sign the gateway's challenge nonce so the server can verify
+        // this connection against the paired device record. Matches
+        // `openclaw/ui/src/ui/gateway.ts:buildGatewayConnectDevice`.
+        let signed = dev.sign_connect(SignConnectParams {
+            client_id,
+            client_mode,
+            role,
+            scopes,
+            token,
+            nonce: &nonce,
+            signed_at_ms: chrono_now_ms(),
+        });
+        // Schema: `frames.ts:43` — `{id, publicKey, signature, signedAt, nonce}`
+        // with `additionalProperties: false`. `signedAt` is the same ms value
+        // that went into the v2 payload; the gateway echoes the nonce into
+        // its verification payload, so we must pass it here too.
+        params_obj["device"] = json!({
+            "id": dev.device_id,
+            "publicKey": dev.public_key_base64url(),
+            "signature": signed.signature_base64url,
+            "signedAt": signed.signed_at_ms,
+            "nonce": nonce,
+        });
     }
     let connect_frame = json!({
         "type": "req",

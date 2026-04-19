@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod device_identity;
 mod domain;
 mod net;
 mod scene;
