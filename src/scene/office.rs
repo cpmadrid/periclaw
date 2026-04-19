@@ -21,6 +21,9 @@ pub struct OfficeScene<'a> {
     pub roster: &'a [Agent],
     pub statuses: &'a HashMap<AgentId, AgentStatus>,
     pub bubbles: &'a [ThoughtBubble],
+    /// Instant of each agent's most recent status change, used to
+    /// drive the ring-pulse flash.
+    pub transition_moments: &'a HashMap<AgentId, Instant>,
     pub cache: &'a canvas::Cache,
 }
 
@@ -62,16 +65,29 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                 per_room.entry(room).or_default().push(agent);
             }
 
+            let now = Instant::now();
             let mut sprite_positions: HashMap<AgentId, Point> = HashMap::new();
             for (room, agents) in per_room {
                 for (idx, agent) in agents.iter().enumerate() {
-                    let pos = layout.sprite_slot(room, idx);
-                    draw_sprite(frame, pos, agent);
-                    sprite_positions.insert(agent.id.clone(), pos);
+                    let base_pos = layout.sprite_slot(room, idx);
+                    let status = self
+                        .statuses
+                        .get(&agent.id)
+                        .copied()
+                        .unwrap_or(AgentStatus::Unknown);
+                    let flash = self
+                        .transition_moments
+                        .get(&agent.id)
+                        .map(|t| transition_flash(now.saturating_duration_since(*t)))
+                        .unwrap_or(0.0);
+                    let pos = animated_position(base_pos, status, now);
+                    draw_sprite(frame, pos, agent, flash);
+                    // Bubble anchor stays on the static slot so the
+                    // tail doesn't whip around with the bob.
+                    sprite_positions.insert(agent.id.clone(), base_pos);
                 }
             }
 
-            let now = Instant::now();
             for bubble in self.bubbles {
                 let Some(alpha) = bubble.alpha(now) else {
                     continue;
@@ -160,23 +176,30 @@ fn draw_bubble(
     });
 }
 
-fn draw_sprite(frame: &mut canvas::Frame, pos: Point, agent: &Agent) {
+fn draw_sprite(frame: &mut canvas::Frame, pos: Point, agent: &Agent, flash: f32) {
     let color: Color = agent.color();
 
     // Body: small filled circle (placeholder for pixel sprite).
     let body = Path::circle(pos, 12.0);
     frame.fill(&body, color);
 
-    // Soft glow ring.
+    // Soft glow ring. On a fresh status transition the ring briefly
+    // thickens and brightens (`flash ∈ [0, 1]`) before decaying back.
+    let ring_width = 4.0 + 4.0 * flash;
+    let ring_alpha = 0.35 + 0.55 * flash;
     frame.stroke(
         &body,
         Stroke::default()
-            .with_color(Color { a: 0.35, ..color })
-            .with_width(4.0),
+            .with_color(Color {
+                a: ring_alpha,
+                ..color
+            })
+            .with_width(ring_width),
     );
 
     // Name tag under the sprite. We approximate "centered" by offsetting
     // by half the expected text width (monospace ≈ 6px per char @ 11pt).
+    // Tag uses the static y so it doesn't bounce with the body.
     let approx_width = (agent.display.len() as f32) * 6.0;
     frame.fill_text(Text {
         content: agent.display.to_string(),
@@ -186,4 +209,42 @@ fn draw_sprite(frame: &mut canvas::Frame, pos: Point, agent: &Agent) {
         font: iced::Font::MONOSPACE,
         ..Text::default()
     });
+}
+
+/// Running sprites bob subtly to mark them as busy. Other states
+/// draw at their resting slot.
+fn animated_position(base: Point, status: AgentStatus, now: Instant) -> Point {
+    if !matches!(status, AgentStatus::Running) {
+        return base;
+    }
+    // ~1.5 Hz sine, ±3 px amplitude. Plenty of signal, not frantic.
+    const BOB_AMPLITUDE_PX: f32 = 3.0;
+    const BOB_HZ: f32 = 1.5;
+    let t = clock_phase(now);
+    let offset = BOB_AMPLITUDE_PX * (t * std::f32::consts::TAU * BOB_HZ).sin();
+    Point::new(base.x, base.y + offset)
+}
+
+/// Map an `Instant` to a repeating seconds-since-some-epoch value.
+/// Using wall-clock would tie every sprite's phase to the current
+/// time of day; instead we anchor to the process's first call so
+/// animations start at phase 0 when the scene first paints.
+fn clock_phase(now: Instant) -> f32 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(|| now);
+    now.saturating_duration_since(epoch).as_secs_f32()
+}
+
+/// Convert elapsed-since-transition duration into a 0..1 flash
+/// intensity that rises fast then fades. Matches
+/// `app::TRANSITION_FLASH` for the total envelope.
+fn transition_flash(age: std::time::Duration) -> f32 {
+    const FLASH_MS: f32 = 600.0;
+    let elapsed_ms = age.as_millis() as f32;
+    if elapsed_ms >= FLASH_MS {
+        return 0.0;
+    }
+    // Quick attack, slow decay — eye-catch without a hard cut.
+    let t = elapsed_ms / FLASH_MS; // 0..1
+    (1.0 - t).powi(2)
 }

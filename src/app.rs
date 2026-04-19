@@ -84,6 +84,10 @@ pub struct App {
     /// Rolling log-tail ring buffer, fed by the periodic `logs.tail`
     /// RPC. Bounded so memory stays flat on a long-running session.
     pub log_lines: VecDeque<String>,
+    /// Instant at which each agent last changed status. Drives the
+    /// ring-pulse animation in `OfficeScene`; entries older than
+    /// [`TRANSITION_FLASH`] are pruned each tick.
+    pub transition_moments: HashMap<AgentId, Instant>,
     pub scene_cache: canvas::Cache,
 }
 
@@ -92,6 +96,11 @@ pub struct SessionUsage {
     pub total_tokens: i64,
     pub context_tokens: i64,
 }
+
+/// How long a status-transition flash persists before the ring pulse
+/// fades back to its resting stroke. Eye-noticeable without feeling
+/// frantic.
+pub const TRANSITION_FLASH: Duration = Duration::from_millis(600);
 
 impl Default for App {
     fn default() -> Self {
@@ -111,6 +120,7 @@ impl Default for App {
             cron_details: HashMap::new(),
             channel_details: HashMap::new(),
             log_lines: VecDeque::with_capacity(2048),
+            transition_moments: HashMap::new(),
             scene_cache: canvas::Cache::default(),
         }
     }
@@ -156,10 +166,16 @@ impl App {
                 let now = Instant::now();
                 let before = self.bubbles.len();
                 self.bubbles.retain(|b| !b.expired(now));
-                if self.bubbles.len() != before {
-                    self.scene_cache.clear();
-                } else if !self.bubbles.is_empty() {
-                    // Force a redraw while bubbles exist so their alpha animates.
+                self.transition_moments
+                    .retain(|_, t| now.saturating_duration_since(*t) < TRANSITION_FLASH);
+                // Redraw every tick while anything is animating (bubbles
+                // fading, sprites bobbing, rings pulsing). Cheap — the
+                // canvas cache absorbs static frames, and `Tick` itself
+                // already throttles to 33 ms when animation is live.
+                if self.bubbles.len() != before
+                    || !self.bubbles.is_empty()
+                    || self.any_sprite_animating(now)
+                {
                     self.scene_cache.clear();
                 }
                 Task::none()
@@ -384,12 +400,29 @@ impl App {
         self.scene_cache.clear();
     }
 
+    /// True when any sprite is in a state that drives per-frame
+    /// redraws — a Running agent bobs, and any just-transitioned
+    /// agent pulses a ring flash for [`TRANSITION_FLASH`].
+    fn any_sprite_animating(&self, now: Instant) -> bool {
+        if self
+            .statuses
+            .values()
+            .any(|s| matches!(s, AgentStatus::Running))
+        {
+            return true;
+        }
+        self.transition_moments
+            .values()
+            .any(|t| now.saturating_duration_since(*t) < TRANSITION_FLASH)
+    }
+
     fn apply_status_update(&mut self, id: AgentId, next: AgentStatus) {
         let prev = self.statuses.get(&id).copied();
         if prev == Some(next) {
             return;
         }
         self.statuses.insert(id.clone(), next);
+        self.transition_moments.insert(id.clone(), Instant::now());
         if let Some(text) = transition_text(prev, next) {
             self.bubbles.push(ThoughtBubble::new(id, text));
         }
@@ -425,6 +458,7 @@ impl App {
             roster: &self.roster,
             statuses: &self.statuses,
             bubbles: &self.bubbles,
+            transition_moments: &self.transition_moments,
             cache: &self.scene_cache,
         };
 
@@ -489,8 +523,12 @@ impl App {
             Subscription::run(openclaw::connect).map(Message::Ws)
         };
 
-        // Idle-aware tick: 33ms while bubbles are animating, 500ms otherwise.
-        let tick_interval = if self.bubbles.is_empty() {
+        // Idle-aware tick. Bump to 33 ms while anything is moving —
+        // bubbles, running-sprite bob, or a transition flash — and
+        // drop back to 500 ms when the scene is static so we don't
+        // burn CPU on a mostly-quiet office.
+        let tick_interval = if self.bubbles.is_empty() && !self.any_sprite_animating(Instant::now())
+        {
             Duration::from_millis(500)
         } else {
             Duration::from_millis(33)
