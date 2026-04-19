@@ -79,7 +79,7 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                 let Some(anchor) = sprite_positions.get(&bubble.agent).copied() else {
                     continue;
                 };
-                draw_bubble(frame, anchor, &bubble.text, alpha);
+                draw_bubble(frame, anchor, &bubble.text, bubble.kind, alpha);
             }
         });
 
@@ -111,24 +111,34 @@ fn draw_room(frame: &mut canvas::Frame, layout: &RoomLayout, room: RoomId) {
     });
 }
 
-fn draw_bubble(frame: &mut canvas::Frame, anchor: Point, text: &str, alpha: f32) {
+fn draw_bubble(
+    frame: &mut canvas::Frame,
+    anchor: Point,
+    text: &str,
+    kind: crate::scene::BubbleKind,
+    alpha: f32,
+) {
     // Approximate width for monospace at 11pt.
     let width = (text.len() as f32 * 6.5).max(40.0) + 12.0;
     let height = 20.0;
     let bubble_origin = Point::new(anchor.x - width / 2.0, anchor.y - 42.0);
 
+    // Border/text hue per bubble kind so the operator can read the
+    // office at a glance: tool calls stand out in amber, chat/status
+    // share the signature terminal green.
+    let accent = match kind {
+        crate::scene::BubbleKind::Tool => *theme::STATUS_DEGRADED,
+        _ => *theme::TERMINAL_GREEN,
+    };
     let fill = Color {
         a: alpha * 0.95,
         ..(*theme::SURFACE_3)
     };
     let border = Color {
         a: alpha * 0.9,
-        ..(*theme::TERMINAL_GREEN)
+        ..accent
     };
-    let text_col = Color {
-        a: alpha,
-        ..(*theme::TERMINAL_GREEN)
-    };
+    let text_col = Color { a: alpha, ..accent };
 
     let rect = Path::rectangle(bubble_origin, Size::new(width, height));
     frame.fill(&rect, fill);

@@ -621,7 +621,7 @@ async fn handle_event(
             tracing::debug!(phase, tool = tool_name, "session.tool");
             if phase == "start" {
                 let _ = out
-                    .send(WsEvent::AgentMessage {
+                    .send(WsEvent::AgentToolInvoked {
                         agent_id: AgentId::new(CHAT_AGENT_ID),
                         text: format!("⚙ {tool_name}"),
                     })

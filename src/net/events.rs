@@ -23,6 +23,13 @@ pub enum WsEvent {
         agent_id: AgentId,
         text: String,
     },
+    /// Tool-invocation text (e.g. `⚙ exec`) — spawns a distinctly
+    /// styled bubble so the operator can tell tool calls apart from
+    /// conversational messages.
+    AgentToolInvoked {
+        agent_id: AgentId,
+        text: String,
+    },
     /// Agent activity signal (tool call started, errored, etc.) without
     /// new text. Used to nudge the sprite's animation state.
     AgentActivity {

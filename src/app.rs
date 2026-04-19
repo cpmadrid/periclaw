@@ -157,6 +157,18 @@ impl App {
                         .push(ThoughtBubble::message(agent_id, snippet));
                 }
             }
+            WsEvent::AgentToolInvoked { agent_id, text } => {
+                self.last_poll = Some(Instant::now());
+                let snippet = clean_bubble_text(&text, 80);
+                if !snippet.is_empty() {
+                    tracing::info!(
+                        agent = %agent_id.as_str(),
+                        preview = %snippet,
+                        "tool invoke → bubble",
+                    );
+                    self.bubbles.push(ThoughtBubble::tool(agent_id, snippet));
+                }
+            }
             WsEvent::AgentActivity { agent_id, kind } => {
                 self.last_poll = Some(Instant::now());
                 let status = match kind {

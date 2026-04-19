@@ -33,6 +33,10 @@ pub enum BubbleKind {
     Status,
     /// Live text from the agent — longer TTL, verbatim content.
     Message,
+    /// Tool-invocation bubble ("⚙ exec") — distinct color so the
+    /// operator can tell at a glance whether the agent is talking
+    /// vs. reaching for a tool. Same lifetime as Message.
+    Tool,
 }
 
 impl ThoughtBubble {
@@ -55,17 +59,28 @@ impl ThoughtBubble {
         }
     }
 
+    /// Constructor for tool-invocation bubbles — longer TTL, styled
+    /// distinctly in the canvas renderer.
+    pub fn tool(agent: AgentId, text: impl Into<String>) -> Self {
+        Self {
+            agent,
+            text: text.into(),
+            born: Instant::now(),
+            kind: BubbleKind::Tool,
+        }
+    }
+
     fn ttl(&self) -> Duration {
         match self.kind {
             BubbleKind::Status => TTL,
-            BubbleKind::Message => MESSAGE_TTL,
+            BubbleKind::Message | BubbleKind::Tool => MESSAGE_TTL,
         }
     }
 
     fn fade_start(&self) -> Duration {
         match self.kind {
             BubbleKind::Status => FADE_START,
-            BubbleKind::Message => MESSAGE_FADE_START,
+            BubbleKind::Message | BubbleKind::Tool => MESSAGE_FADE_START,
         }
     }
 

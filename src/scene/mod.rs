@@ -4,4 +4,4 @@ pub mod thought_bubble;
 
 pub use office::OfficeScene;
 pub use room::RoomLayout;
-pub use thought_bubble::{ThoughtBubble, transition_text};
+pub use thought_bubble::{BubbleKind, ThoughtBubble, transition_text};
