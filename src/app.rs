@@ -138,16 +138,24 @@ impl App {
                 self.last_poll = Some(Instant::now());
                 // Real agent text goes straight into a bubble — bypasses
                 // `apply_status_update` since this isn't a status change.
-                // Trim to a reasonable bubble length; the canvas renderer
-                // sizes the bubble by text.len().
-                let snippet = truncate(&text, 80);
-                tracing::info!(
-                    agent = %agent_id.as_str(),
-                    preview = %snippet,
-                    "agent message → bubble",
-                );
-                self.bubbles
-                    .push(ThoughtBubble::message(agent_id, snippet));
+                // `clean_bubble_text` strips markdown fences and collapses
+                // whitespace so multi-line code-block replies read as a
+                // single legible line.
+                let snippet = clean_bubble_text(&text, 80);
+                if snippet.is_empty() {
+                    tracing::debug!(
+                        agent = %agent_id.as_str(),
+                        "agent message empty after cleanup, skipping bubble",
+                    );
+                } else {
+                    tracing::info!(
+                        agent = %agent_id.as_str(),
+                        preview = %snippet,
+                        "agent message → bubble",
+                    );
+                    self.bubbles
+                        .push(ThoughtBubble::message(agent_id, snippet));
+                }
             }
             WsEvent::AgentActivity { agent_id, kind } => {
                 self.last_poll = Some(Instant::now());
@@ -294,10 +302,49 @@ impl App {
     }
 }
 
-/// Clip a string to at most `max` chars (by Unicode scalar value),
-/// appending `…` when truncated. Used to keep chat bubbles legible.
-fn truncate(s: &str, max: usize) -> String {
-    let trimmed = s.trim();
+/// Turn raw assistant text into something that reads cleanly on a
+/// single-line bubble. Strips markdown code fences, collapses
+/// whitespace, drops common emphasis markers, then clips to `max`
+/// Unicode scalars with a trailing `…` when truncated.
+fn clean_bubble_text(raw: &str, max: usize) -> String {
+    let mut body: Vec<&str> = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            // Fence open or close — drop entirely; the language tag
+            // after ``` isn't interesting on a bubble either.
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        body.push(trimmed);
+    }
+    // Collapse runs of whitespace across the joined text and drop
+    // markdown emphasis asterisks/underscores that would read as
+    // literal characters in the bubble font.
+    let joined = body.join(" ");
+    let mut compact = String::with_capacity(joined.len());
+    let mut prev_space = false;
+    for ch in joined.chars() {
+        match ch {
+            // Drop markdown emphasis (`*bold*`) and inline-code
+            // backticks. Leave `_` alone — legitimate identifiers
+            // like `x86_64` or `session_key` contain it.
+            '*' | '`' => continue,
+            c if c.is_whitespace() => {
+                if !prev_space && !compact.is_empty() {
+                    compact.push(' ');
+                }
+                prev_space = true;
+            }
+            c => {
+                compact.push(c);
+                prev_space = false;
+            }
+        }
+    }
+    let trimmed = compact.trim();
     if trimmed.chars().count() <= max {
         return trimmed.to_string();
     }
@@ -321,4 +368,38 @@ fn coming_soon(title: &'static str) -> Element<'static, Message> {
     .height(Length::Fill)
     .padding(iced::Padding::from(24))
     .into()
+}
+
+#[cfg(test)]
+mod bubble_cleanup_tests {
+    use super::clean_bubble_text;
+
+    #[test]
+    fn strips_code_fences_and_joins_lines() {
+        let input = "```\nLinux ubu-3xdv 6.8.0-110-generic\nx86_64 GNU/Linux\n```";
+        assert_eq!(
+            clean_bubble_text(input, 80),
+            "Linux ubu-3xdv 6.8.0-110-generic x86_64 GNU/Linux"
+        );
+    }
+
+    #[test]
+    fn drops_markdown_emphasis_and_collapses_whitespace() {
+        let input = "Done with **step 1** and    *step 2*.";
+        assert_eq!(clean_bubble_text(input, 80), "Done with step 1 and step 2.");
+    }
+
+    #[test]
+    fn truncates_with_ellipsis() {
+        let input = "a".repeat(200);
+        let out = clean_bubble_text(&input, 10);
+        assert_eq!(out.chars().count(), 10);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn empty_after_cleanup_returns_empty() {
+        assert_eq!(clean_bubble_text("```\n```", 80), "");
+        assert_eq!(clean_bubble_text("   ", 80), "");
+    }
 }
