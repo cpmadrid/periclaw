@@ -1,3 +1,12 @@
+//! **Deprecated: debug fallback only.** The WebSocket client
+//! (`net::openclaw`) is now the primary data path — it receives cron
+//! updates as push events from the gateway instead of polling. This
+//! SSH-based reader is retained for diagnosing WS issues and is only
+//! selected when both `OPENCLAW_FORCE_SSH=1` and `OPENCLAW_SSH_HOST`
+//! are set. Do not extend.
+//!
+//! ---
+//!
 //! Pragmatic real-data path: cat OpenClaw state files over SSH.
 //!
 //! The gateway's WebSocket handshake proved finicky to replicate from

@@ -79,7 +79,7 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                 let Some(anchor) = sprite_positions.get(&bubble.agent).copied() else {
                     continue;
                 };
-                draw_bubble(frame, anchor, bubble.text, alpha);
+                draw_bubble(frame, anchor, &bubble.text, alpha);
             }
         });
 

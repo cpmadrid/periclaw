@@ -23,9 +23,29 @@ const KEYRING_USER: &str = "openclaw-gateway-token";
 
 // NOT `/__openclaw__/ws` — that's the CANVAS WS path, which intercepts
 // WS upgrades first and runs a different protocol. Gateway WS lives at
-// root, falling through after canvas declines. Verified against
-// openclaw/src/gateway/client.ts default `ws://127.0.0.1:18789`.
-pub const GATEWAY_URL: &str = "ws://100.87.202.125:18789/";
+// root, falling through after canvas declines.
+//
+// Default connects through **Tailscale Serve** (`wss://<host>.ts.net/`)
+// rather than the raw IP+port. Tailscale Serve terminates TLS and
+// injects whois headers the gateway trusts when `allowTailscale: true`
+// — so the client doesn't need to hold the gateway's `auth.token` at
+// all. The raw `ws://100.87.202.125:18789/` endpoint bypasses Serve
+// and requires the real token.
+//
+// Override with `OPENCLAW_GATEWAY_URL` if you need the raw endpoint
+// (and have the 48-char `gateway.auth.token` in `OPENCLAW_TOKEN`).
+pub const DEFAULT_GATEWAY_URL: &str = "wss://ubu-3xdv.tail4fb3a4.ts.net/";
+
+/// Resolve the gateway URL at runtime, honoring `OPENCLAW_GATEWAY_URL`.
+pub fn gateway_url() -> String {
+    std::env::var("OPENCLAW_GATEWAY_URL")
+        .ok()
+        .and_then(|s| {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        })
+        .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -45,6 +65,21 @@ pub enum ConfigError {
     Keyring(#[from] keyring::Error),
     #[error("file write error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Try to load a gateway token. Returns `None` when no token is
+/// available — that's the Tailscale-Serve-only case, where the gateway
+/// authenticates the connection via Tailscale whois headers and a
+/// client-side token would only interfere (it flips the gateway into
+/// token-comparison mode; see `openclaw/src/gateway/auth.ts:577`).
+pub fn try_load_token() -> Option<String> {
+    match load_token() {
+        Ok(tok) => Some(tok),
+        Err(e) => {
+            tracing::debug!(error = %e, "no gateway token; relying on Tailscale auth");
+            None
+        }
+    }
 }
 
 /// Load the OpenClaw gateway token, bootstrapping to the keyring on first run.

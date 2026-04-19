@@ -37,11 +37,21 @@ RUN OPTIONS:
     --mode <mock|ssh|ws|auto>
                              Data source. Default: auto (use env vars as-is)
                                mock   — scripted fixture (no network)
-                               ssh    — SSH+file reader (real data)
-                               ws     — native WS handshake (health only today)
+                               ssh    — SSH+file reader (legacy debug)
+                               ws     — native WS push stream (default)
     --ssh-host <target>      SSH target for --mode ssh (default: workstation)
     --release, -r            Release build
     --no-build               Skip cargo build; exec the pre-built binary
+
+LOGGING (run):
+    --log <console|file|both>
+                             Where logs go. Default: console.
+                               console — stderr/stdout (default dev)
+                               file    — redirect to a timestamped file
+                               both    — tee to both
+    --log-level <level>      trace | debug | info (default) | warn | error
+    --log-file <path>        Override default log path
+                             (default: Logs/desktop-<timestamp>.log)
 
 BUILD OPTIONS:
     --release, -r            Release build + strip
@@ -55,10 +65,12 @@ GENERAL:
     --quiet                  Minimal logging (RUST_LOG=warn)
 
 EXAMPLES:
-    ./dev run                               # auto mode, debug
+    ./dev run                               # auto mode, debug, console logs
     ./dev run --mode mock                   # scripted fixture
-    ./dev run --mode ssh                    # real data via ssh workstation
     ./dev run --mode ssh --ssh-host ubu-3xdv
+    ./dev run --log both                    # tee logs to console + file
+    ./dev run --log file --log-level trace  # capture verbose trace to file
+    ./dev run --log-file /tmp/ws.log --log both
     ./dev run --release                     # release build + run
     ./dev build --release                   # stripped release binary
     ./dev test                              # cargo test
@@ -79,6 +91,9 @@ CLEAN=false
 FMT_CHECK=false
 VERBOSE=false
 QUIET=false
+LOG_TARGETS="console"         # console | file | both
+LOG_LEVEL="info"              # trace | debug | info | warn | error
+LOG_FILE=""                   # empty → default to Logs/desktop-<timestamp>.log
 
 # -----------------------------------------------------------------------------
 # Arg parsing — activity first, then flags.
@@ -103,6 +118,9 @@ while [[ $# -gt 0 ]]; do
         --check)          FMT_CHECK=true; shift ;;
         --verbose)        VERBOSE=true; shift ;;
         --quiet)          QUIET=true; shift ;;
+        --log)            LOG_TARGETS="$2"; shift 2 ;;
+        --log-level)      LOG_LEVEL="$2"; shift 2 ;;
+        --log-file)       LOG_FILE="$2"; shift 2 ;;
         -h|--help|help)   show_help; exit 0 ;;
         --)               shift; break ;;
         *)                # Pass unknown args through to subscripts (e.g., cargo test filter)
@@ -111,14 +129,33 @@ while [[ $# -gt 0 ]]; do
 done
 EXTRA_ARGS=("${EXTRA_ARGS[@]:-}")
 
-# Export knobs consumed by Scripts/*.sh
-export BUILD_TYPE MODE SSH_HOST NO_BUILD CLEAN
+# Validate logging flags.
+case "$LOG_TARGETS" in
+    console|file|both) ;;
+    *) print_error "invalid --log '$LOG_TARGETS' (expected: console, file, both)"; exit 1 ;;
+esac
+case "$LOG_LEVEL" in
+    trace|debug|info|warn|error) ;;
+    *) print_error "invalid --log-level '$LOG_LEVEL' (expected: trace, debug, info, warn, error)"; exit 1 ;;
+esac
 
+# `--verbose` / `--quiet` are legacy shortcuts that override --log-level.
 if [[ "$VERBOSE" == "true" ]]; then
-    export RUST_LOG="sassy_mc=trace,debug"
+    LOG_LEVEL="trace"
 elif [[ "$QUIET" == "true" ]]; then
-    export RUST_LOG="warn"
+    LOG_LEVEL="warn"
 fi
+
+# Build RUST_LOG from LOG_LEVEL. Our crate gets the requested level; all
+# other crates stay at warn so we don't drown in iced/winit/wgpu chatter.
+# Respect an existing RUST_LOG env var — it's a power-user override.
+if [[ -z "${RUST_LOG:-}" ]]; then
+    RUST_LOG="sassy_mc=${LOG_LEVEL},warn"
+fi
+export RUST_LOG
+
+# Export knobs consumed by Scripts/*.sh
+export BUILD_TYPE MODE SSH_HOST NO_BUILD CLEAN LOG_TARGETS LOG_LEVEL LOG_FILE
 
 # -----------------------------------------------------------------------------
 # Activity dispatch

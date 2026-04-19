@@ -15,15 +15,15 @@ pub const FADE_START: Duration = Duration::from_millis(1500);
 #[derive(Debug, Clone)]
 pub struct ThoughtBubble {
     pub agent: AgentId,
-    pub text: &'static str,
+    pub text: String,
     pub born: Instant,
 }
 
 impl ThoughtBubble {
-    pub fn new(agent: AgentId, text: &'static str) -> Self {
+    pub fn new(agent: AgentId, text: impl Into<String>) -> Self {
         Self {
             agent,
-            text,
+            text: text.into(),
             born: Instant::now(),
         }
     }

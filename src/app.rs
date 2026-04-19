@@ -7,6 +7,8 @@ use iced::widget::{Canvas, canvas};
 use iced::{Element, Length, Subscription, time};
 
 use crate::domain::{Agent, AgentId, AgentStatus, agent};
+use crate::net::events::ActivityKind;
+use crate::net::rpc::ApprovalEventPayload;
 use crate::net::{WsEvent, events, mock, openclaw, openclaw_ssh};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
 use crate::ui::{agent_card, sidebar, status_bar, theme};
@@ -32,9 +34,16 @@ pub struct App {
     pub statuses: HashMap<AgentId, AgentStatus>,
     pub bubbles: Vec<ThoughtBubble>,
     pub active_model: Option<String>,
+    /// Timestamp of the most recent state update (push event OR bootstrap
+    /// RPC). Despite the name, not a polling indicator — kept for the
+    /// status-bar "last activity" readout.
     pub last_poll: Option<Instant>,
     pub connected: bool,
     pub last_disconnect: Option<String>,
+    /// Pending exec approvals keyed by approval id. Populated by
+    /// `exec.approval.requested`, cleared by `.resolved`. Scope-gated
+    /// (empty unless the gateway granted `operator.read`+approvals).
+    pub pending_approvals: HashMap<String, ApprovalEventPayload>,
     pub scene_cache: canvas::Cache,
 }
 
@@ -49,6 +58,7 @@ impl Default for App {
             last_poll: None,
             connected: false,
             last_disconnect: None,
+            pending_approvals: HashMap::new(),
             scene_cache: canvas::Cache::default(),
         }
     }
@@ -99,6 +109,12 @@ impl App {
                     self.apply_status_update(id, status);
                 }
             }
+            WsEvent::CronDelta(cron) => {
+                self.last_poll = Some(Instant::now());
+                let id = events::cron_agent_id(&cron);
+                let status = events::cron_status(&cron);
+                self.apply_status_update(id, status);
+            }
             WsEvent::ChannelSnapshot(channels) => {
                 self.last_poll = Some(Instant::now());
                 for ch in &channels {
@@ -114,6 +130,50 @@ impl App {
                 let id = AgentId::new(&main.id);
                 let status = events::main_agent_status(&main);
                 self.apply_status_update(id, status);
+            }
+            WsEvent::AgentMessage { agent_id, text } => {
+                self.last_poll = Some(Instant::now());
+                // Real agent text goes straight into a bubble — bypasses
+                // `apply_status_update` since this isn't a status change.
+                // Trim to a reasonable bubble length; the canvas renderer
+                // sizes the bubble by text.len().
+                let snippet = truncate(&text, 80);
+                self.bubbles.push(ThoughtBubble::new(agent_id, snippet));
+            }
+            WsEvent::AgentActivity { agent_id, kind } => {
+                self.last_poll = Some(Instant::now());
+                let status = match kind {
+                    ActivityKind::Thinking | ActivityKind::ToolCalling => AgentStatus::Running,
+                    ActivityKind::Errored => AgentStatus::Error,
+                };
+                self.apply_status_update(agent_id, status);
+            }
+            WsEvent::SessionsChanged => {
+                self.last_poll = Some(Instant::now());
+                tracing::trace!("sessions.changed");
+            }
+            WsEvent::ApprovalRequested(payload) => {
+                self.last_poll = Some(Instant::now());
+                let key = payload.id.clone().unwrap_or_else(|| {
+                    // No id — best-effort key from tool+summary so
+                    // resolved(null-id) still matches something.
+                    format!(
+                        "{}:{}",
+                        payload.tool.as_deref().unwrap_or("?"),
+                        payload.summary.as_deref().unwrap_or(""),
+                    )
+                });
+                self.pending_approvals.insert(key, payload);
+            }
+            WsEvent::ApprovalResolved { id } => {
+                self.last_poll = Some(Instant::now());
+                if let Some(id) = id.as_deref() {
+                    self.pending_approvals.remove(id);
+                } else {
+                    // Unidentified resolve — safest to clear all since we
+                    // can't tell which survived.
+                    self.pending_approvals.clear();
+                }
             }
         }
     }
@@ -179,10 +239,22 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        // Selector: mock > ssh+cli > native ws (scaffolded, handshake TBD).
+        // Selector (in precedence order):
+        //   1. `OPENCLAW_MOCK=1`            → synthetic fixtures (dev UI work)
+        //   2. native WS                    → push-driven live data (default)
+        //   3. `OPENCLAW_SSH_HOST=<host>` + `OPENCLAW_FORCE_SSH=1` → SSH file
+        //      reader (legacy debug fallback).
+        //
+        // SSH is no longer selected by mere presence of `OPENCLAW_SSH_HOST`
+        // because that env var is widely set in dev shells and we don't want
+        // to accidentally fall back to polling. Opt in explicitly with
+        // `OPENCLAW_FORCE_SSH=1` when diagnosing WS issues.
+        let force_ssh = std::env::var("OPENCLAW_FORCE_SSH")
+            .ok()
+            .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
         let ws = if mock::enabled() {
             Subscription::run(mock::connect).map(Message::Ws)
-        } else if openclaw_ssh::host().is_some() {
+        } else if force_ssh && openclaw_ssh::host().is_some() {
             Subscription::run(openclaw_ssh::connect).map(Message::Ws)
         } else {
             Subscription::run(openclaw::connect).map(Message::Ws)
@@ -202,6 +274,18 @@ impl App {
     pub fn theme(&self) -> iced::Theme {
         theme::mission_control_theme()
     }
+}
+
+/// Clip a string to at most `max` chars (by Unicode scalar value),
+/// appending `…` when truncated. Used to keep chat bubbles legible.
+fn truncate(s: &str, max: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn coming_soon(title: &'static str) -> Element<'static, Message> {

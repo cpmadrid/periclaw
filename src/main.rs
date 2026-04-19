@@ -15,6 +15,13 @@ fn main() -> iced::Result {
         )
         .init();
 
+    // Required before opening any `wss://` connection. rustls 0.23
+    // refuses to pick a default crypto backend at runtime unless one
+    // is either selected at crate-feature time or installed here.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls ring crypto provider");
+
     tracing::info!("starting Mission Control Desktop");
 
     iced::application(app::App::default, app::App::update, app::App::view)
