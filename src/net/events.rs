@@ -5,7 +5,7 @@
 
 use crate::domain::{AgentId, AgentStatus};
 use crate::net::rpc::{
-    ApprovalEventPayload, Channel, CronEventPayload, CronJob, CronState, MainAgent,
+    AgentInfo, ApprovalEventPayload, Channel, CronEventPayload, CronJob, CronState, MainAgent,
 };
 
 #[derive(Debug, Clone)]
@@ -18,6 +18,10 @@ pub enum WsEvent {
     ChannelSnapshot(Vec<Channel>),
     /// Main agent status update.
     MainAgent(MainAgent),
+    /// `agents.list` snapshot — drives roster-display overrides
+    /// (identityName / identityEmoji) so main renders as
+    /// "Sebastian 🦀" instead of the generic "main".
+    AgentsIdentity(Vec<AgentInfo>),
     /// Real agent chat text — feed directly into a thought bubble.
     AgentMessage { agent_id: AgentId, text: String },
     /// Tool-invocation text (e.g. `⚙ exec`) — spawns a distinctly

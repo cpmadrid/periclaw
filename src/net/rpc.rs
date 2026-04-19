@@ -56,6 +56,24 @@ pub struct MainAgent {
     pub state: Option<String>,
 }
 
+/// Response of the `agent.identity.get` RPC. Carries the persona
+/// metadata (display name + emoji) that makes the office feel less
+/// anonymous — `main` is really "Sebastian 🦀" to the operator.
+///
+/// The WS `agents.list` RPC returns only basic config (id, workspace,
+/// model) — no identity fields — so we pull from `agent.identity.get`
+/// instead, which is the authoritative source backed by
+/// `resolveAssistantIdentity` on the server.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentInfo {
+    #[serde(rename = "agentId")]
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub emoji: Option<String>,
+}
+
 /// Gateway broadcast `cron` event. Shape from
 /// `openclaw/src/cron/service/state.ts` (`CronEvent`).
 #[derive(Debug, Clone, Deserialize)]

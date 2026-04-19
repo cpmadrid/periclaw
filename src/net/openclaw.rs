@@ -69,8 +69,8 @@ use crate::net::events::{
     ActivityKind, GatewayUpdate, agent_stream_to_activity, cron_job_from_event,
 };
 use crate::net::rpc::{
-    AgentEventPayload, ApprovalEventPayload, Channel, CronEventPayload, CronJob, MainAgent,
-    SessionInfo,
+    AgentEventPayload, AgentInfo, ApprovalEventPayload, Channel, CronEventPayload, CronJob,
+    MainAgent, SessionInfo,
 };
 
 /// Cadence of the channel-status heartbeat RPC. Channels are not yet
@@ -267,7 +267,12 @@ async fn session(
     let client_id = "openclaw-tui";
     let client_mode = "ui";
     let role = "operator";
-    let scopes: &[&str] = &["operator.read"];
+    // `operator.approvals` is required for `exec.approval.resolve` to
+    // land (server-methods/method-scopes.ts:43). Without it the button
+    // clicks look like they worked (the panel collapses optimistically)
+    // but the gateway silently ignores the RPC and re-broadcasts the
+    // same pending approval on the next reconnect.
+    let scopes: &[&str] = &["operator.read", "operator.approvals"];
     let mut params_obj = json!({
         "minProtocol": 3,
         "maxProtocol": 3,
@@ -414,6 +419,18 @@ async fn session(
     // in sync as the main session grows.
     rpc_id += 1;
     send_rpc(&mut socket, rpc_id, "sessions.list").await?;
+    // Pull `agent.identity.get` so the roster can swap the placeholder
+    // "main" display for the operator-chosen persona (name + emoji).
+    // The WS `agents.list` response omits identity — this one is
+    // backed by `resolveAssistantIdentity` on the server.
+    rpc_id += 1;
+    send_rpc_params(
+        &mut socket,
+        rpc_id,
+        "agent.identity.get",
+        json!({ "agentId": "main" }),
+    )
+    .await?;
 
     // UUID → human-readable cron name cache, populated from the
     // snapshot and consulted when cron events arrive. Empty until
@@ -509,11 +526,22 @@ async fn send_rpc(
     id: u64,
     method: &str,
 ) -> Result<(), SessionError> {
+    send_rpc_params(socket, id, method, json!({})).await
+}
+
+async fn send_rpc_params(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<(), SessionError> {
     let frame = json!({
         "type": "req",
         "id": id.to_string(),
         "method": method,
-        "params": {}
+        "params": params,
     });
     socket
         .send(WsMsg::Text(frame.to_string().into()))
@@ -534,15 +562,20 @@ async fn handle_frame(
     match frame_type {
         Some("res") => {
             let ok = frame.get("ok") == Some(&Value::Bool(true));
+            let res_id = frame.get("id").and_then(Value::as_str).unwrap_or("?");
             if !ok {
-                // Scoped RPCs return INVALID_REQUEST when scope is
-                // missing; we surface the hello-ok scope log instead.
-                tracing::trace!(raw = %txt, "gateway res frame not ok");
+                let err_msg = frame
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("(no message)");
+                tracing::warn!(id = %res_id, error = %err_msg, "gateway RPC rejected");
                 return Ok(());
             }
             let Some(payload) = frame.get("payload") else {
                 return Ok(());
             };
+            tracing::trace!(id = %res_id, "gateway res ok");
 
             if let Some(crons) = try_cron_list(payload) {
                 tracing::debug!(count = crons.len(), "cron snapshot");
@@ -554,6 +587,11 @@ async fn handle_frame(
                     }
                 }
                 let _ = out.send(WsEvent::CronSnapshot(crons)).await;
+                return Ok(());
+            }
+            if let Some(agents) = try_agents_list(payload) {
+                tracing::info!(count = agents.len(), "agents list");
+                let _ = out.send(WsEvent::AgentsIdentity(agents)).await;
                 return Ok(());
             }
             if let Some(sessions) = try_session_list(payload) {
@@ -950,6 +988,18 @@ fn try_channel_list(v: &Value) -> Option<Vec<Channel>> {
         .collect::<Vec<_>>();
 
     (!channels.is_empty()).then_some(channels)
+}
+
+fn try_agents_list(v: &Value) -> Option<Vec<AgentInfo>> {
+    // `agent.identity.get` returns a single object:
+    // `{agentId, name, avatar, emoji?}`. The presence of `agentId`
+    // (as opposed to plain `id`) is our signal — other RPC responses
+    // don't use that key.
+    if v.get("agentId").is_some() {
+        let info: AgentInfo = serde_json::from_value(v.clone()).ok()?;
+        return Some(vec![info]);
+    }
+    None
 }
 
 fn try_session_list(v: &Value) -> Option<Vec<SessionInfo>> {

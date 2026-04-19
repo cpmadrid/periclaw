@@ -195,6 +195,29 @@ impl App {
                 let status = events::main_agent_status(&main);
                 self.apply_status_update(id, status);
             }
+            WsEvent::AgentsIdentity(agents) => {
+                for info in &agents {
+                    // Only entries with an explicit identity name
+                    // override the display; others keep their
+                    // roster-seeded label.
+                    let Some(name) = info.name.as_deref().filter(|s| !s.is_empty()) else {
+                        continue;
+                    };
+                    let new_display = match info.emoji.as_deref() {
+                        Some(emoji) if !emoji.is_empty() => format!("{name} {emoji}"),
+                        _ => name.to_string(),
+                    };
+                    let Some(entry) = self.roster.iter_mut().find(|a| a.id.as_str() == info.id)
+                    else {
+                        continue;
+                    };
+                    if entry.display != new_display {
+                        tracing::info!(id = %info.id, display = %new_display, "roster: identity rename");
+                        entry.display = new_display;
+                        self.scene_cache.clear();
+                    }
+                }
+            }
             WsEvent::AgentMessage { agent_id, text } => {
                 self.last_poll = Some(Instant::now());
                 // Real agent text goes straight into a bubble — bypasses
