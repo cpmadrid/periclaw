@@ -8,10 +8,10 @@ use iced::{Element, Length, Subscription, time};
 
 use crate::domain::{Agent, AgentId, AgentKind, AgentStatus, agent};
 use crate::net::events::{ActivityKind, GatewayUpdate};
-use crate::net::rpc::ApprovalEventPayload;
+use crate::net::rpc::{ApprovalEventPayload, Channel, CronState};
 use crate::net::{WsEvent, events, mock, openclaw};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
-use crate::ui::{agent_card, approvals, sidebar, status_bar, theme};
+use crate::ui::{agent_card, agents_view, approvals, sidebar, status_bar, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavItem {
@@ -59,6 +59,15 @@ pub struct App {
     pub session_usage: HashMap<String, SessionUsage>,
     /// Gateway-side update notification, when one is pending.
     pub gateway_update: Option<GatewayUpdate>,
+    /// Full cron state per cron agent — keeps schedule-adjacent fields
+    /// (`nextRunAtMs`, `lastRunAtMs`, `lastDurationMs`, `lastError`)
+    /// that the Agents tab shows but the Overview sprite doesn't need.
+    /// Populated from both the `cron.list` snapshot and the `cron`
+    /// delta stream.
+    pub cron_details: HashMap<AgentId, CronState>,
+    /// Full channel state per channel agent (connected, configured,
+    /// last error). Refreshed by the 30s `channels.status` heartbeat.
+    pub channel_details: HashMap<AgentId, Channel>,
     pub scene_cache: canvas::Cache,
 }
 
@@ -82,6 +91,8 @@ impl Default for App {
             pending_approvals: HashMap::new(),
             session_usage: HashMap::new(),
             gateway_update: None,
+            cron_details: HashMap::new(),
+            channel_details: HashMap::new(),
             scene_cache: canvas::Cache::default(),
         }
     }
@@ -146,6 +157,7 @@ impl App {
                 for cron in &crons {
                     let id = events::cron_agent_id(cron);
                     self.ensure_agent(&id, AgentKind::Cron);
+                    self.cron_details.insert(id.clone(), cron.state.clone());
                     let status = events::cron_status(cron);
                     self.apply_status_update(id, status);
                 }
@@ -154,6 +166,14 @@ impl App {
                 self.last_poll = Some(Instant::now());
                 let id = events::cron_agent_id(&cron);
                 self.ensure_agent(&id, AgentKind::Cron);
+                // Merge rather than replace — push events only carry
+                // the fields that changed, so a `finished` delta
+                // shouldn't wipe the unrelated `nextRunAtMs` from the
+                // previous snapshot.
+                merge_cron_state(
+                    self.cron_details.entry(id.clone()).or_default(),
+                    &cron.state,
+                );
                 let status = events::cron_status(&cron);
                 self.apply_status_update(id, status);
             }
@@ -162,6 +182,7 @@ impl App {
                 for ch in &channels {
                     let id = events::channel_agent_id(ch);
                     self.ensure_agent(&id, AgentKind::Channel);
+                    self.channel_details.insert(id.clone(), ch.clone());
                     let status = events::channel_status(ch);
                     self.apply_status_update(id, status);
                 }
@@ -304,7 +325,14 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let main = match self.nav {
             NavItem::Overview => self.overview(),
-            NavItem::Agents => coming_soon("Agents"),
+            NavItem::Agents => agents_view::view(agents_view::AgentsViewSnapshot {
+                roster: &self.roster,
+                statuses: &self.statuses,
+                cron_details: &self.cron_details,
+                channel_details: &self.channel_details,
+                active_model: self.active_model.as_deref(),
+                session_usage: &self.session_usage,
+            }),
             NavItem::Logs => coming_soon("Logs"),
             NavItem::Settings => coming_soon("Settings"),
         };
@@ -401,6 +429,30 @@ impl App {
 /// single-line bubble. Strips markdown code fences, collapses
 /// whitespace, drops common emphasis markers, then clips to `max`
 /// Unicode scalars with a trailing `…` when truncated.
+/// Merge a cron-state delta onto the stored value — push events only
+/// carry fields that changed, so a bare `finished` delta must not
+/// wipe `nextRunAtMs` from the previous snapshot. `running` is the
+/// one field we always copy since the lifecycle transition is the
+/// whole point of the event.
+fn merge_cron_state(dst: &mut CronState, src: &CronState) {
+    dst.running = src.running;
+    if src.next_run_at_ms.is_some() {
+        dst.next_run_at_ms = src.next_run_at_ms;
+    }
+    if src.last_run_at_ms.is_some() {
+        dst.last_run_at_ms = src.last_run_at_ms;
+    }
+    if src.last_status.is_some() {
+        dst.last_status = src.last_status.clone();
+    }
+    if src.last_duration_ms.is_some() {
+        dst.last_duration_ms = src.last_duration_ms;
+    }
+    if src.last_error.is_some() {
+        dst.last_error = src.last_error.clone();
+    }
+}
+
 fn clean_bubble_text(raw: &str, max: usize) -> String {
     let mut body: Vec<&str> = Vec::new();
     for line in raw.lines() {
