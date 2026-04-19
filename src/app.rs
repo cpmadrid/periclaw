@@ -59,6 +59,11 @@ pub struct App {
     pub session_usage: HashMap<String, SessionUsage>,
     /// Gateway-side update notification, when one is pending.
     pub gateway_update: Option<GatewayUpdate>,
+    /// Non-None when the gateway has filed a scope-upgrade
+    /// pair-request for this device and is waiting on the operator
+    /// to approve it (`openclaw devices approve <id>`). Surfaced in
+    /// the approvals panel area so the fix is visible.
+    pub scope_upgrade_pending: Option<String>,
     /// Full cron state per cron agent — keeps schedule-adjacent fields
     /// (`nextRunAtMs`, `lastRunAtMs`, `lastDurationMs`, `lastError`)
     /// that the Agents tab shows but the Overview sprite doesn't need.
@@ -91,6 +96,7 @@ impl Default for App {
             pending_approvals: HashMap::new(),
             session_usage: HashMap::new(),
             gateway_update: None,
+            scope_upgrade_pending: None,
             cron_details: HashMap::new(),
             channel_details: HashMap::new(),
             scene_cache: canvas::Cache::default(),
@@ -299,6 +305,15 @@ impl App {
             WsEvent::UpdateAvailable(update) => {
                 self.gateway_update = update;
             }
+            WsEvent::ScopeUpgradePending(request_id) => {
+                if request_id.is_some() {
+                    tracing::info!(
+                        request_id = ?request_id,
+                        "scope-upgrade pair-request filed",
+                    );
+                }
+                self.scope_upgrade_pending = request_id;
+            }
             WsEvent::ApprovalResolved { id } => {
                 self.last_poll = Some(Instant::now());
                 if let Some(id) = id.as_deref() {
@@ -408,6 +423,10 @@ impl App {
         } else {
             Some(approvals::view(self.pending_approvals.iter()))
         };
+        let scope_notice = self
+            .scope_upgrade_pending
+            .as_deref()
+            .map(approvals::scope_upgrade_notice);
 
         let mut col = iced::widget::column![
             iced::widget::container(canvas)
@@ -417,6 +436,9 @@ impl App {
             cards,
         ]
         .spacing(0);
+        if let Some(notice) = scope_notice {
+            col = col.push(notice);
+        }
         if let Some(panel) = approvals_panel {
             col = col.push(panel);
         }

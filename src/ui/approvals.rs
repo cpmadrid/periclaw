@@ -16,6 +16,40 @@ use crate::Message;
 use crate::net::rpc::ApprovalEventPayload;
 use crate::ui::theme;
 
+/// Render a "scope-upgrade pair-request pending" notice. Shows the
+/// request id + the CLI command that approves it, so the operator
+/// can act without digging through logs.
+pub fn scope_upgrade_notice(request_id: &str) -> Element<'_, Message> {
+    let body = column![
+        text("Scope upgrade pending").size(12).color(*theme::MUTED),
+        text(
+            "The gateway has filed a pair-request to grant this \
+             desktop approvals permission. Approve it once:",
+        )
+        .size(12)
+        .color(*theme::FOREGROUND),
+        text(format!("openclaw devices approve {request_id}"))
+            .size(11)
+            .color(*theme::TERMINAL_GREEN)
+            .font(iced::Font::MONOSPACE),
+    ]
+    .spacing(6);
+
+    container(body)
+        .width(Length::Fill)
+        .padding(Padding::from([10, 16]))
+        .style(|_| container::Style {
+            background: Some((*theme::SURFACE_1).into()),
+            border: Border {
+                color: *theme::STATUS_DEGRADED,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 /// Render the approvals panel. Returns an empty container when there
 /// are no pending approvals so callers can always include it in the
 /// layout without special-casing.

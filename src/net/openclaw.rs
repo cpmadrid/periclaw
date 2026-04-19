@@ -79,6 +79,10 @@ use crate::net::rpc::{
 const CHANNEL_HEARTBEAT: Duration = Duration::from_secs(30);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Wait while the operator approves a pending scope-upgrade
+/// pair-request. Fast reconnect would just re-file the same
+/// requestId and leak more log noise.
+const SCOPE_UPGRADE_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Milliseconds since the UNIX epoch — the format `signedAtMs` in
 /// the device-auth payload expects. Falls back to zero if the system
@@ -148,6 +152,27 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
             {
                 Ok(()) => {
                     tracing::warn!("session ended cleanly (unexpected); reconnecting");
+                    backoff = INITIAL_BACKOFF;
+                }
+                Err(SessionError::ScopeUpgradePending { request_id }) => {
+                    tracing::warn!(
+                        %request_id,
+                        "scope-upgrade pairing required — waiting for operator approval",
+                    );
+                    let _ = out
+                        .send(WsEvent::ScopeUpgradePending(Some(request_id.clone())))
+                        .await;
+                    let _ = out
+                        .send(WsEvent::Disconnected(format!(
+                            "awaiting scope-upgrade approval ({request_id})"
+                        )))
+                        .await;
+                    // Hot-reconnecting re-ackowledges the same
+                    // requestId without progress and spams logs. Wait
+                    // a long human-paced interval — the operator has
+                    // to go run `openclaw devices approve <id>`.
+                    sleep(SCOPE_UPGRADE_BACKOFF).await;
+                    continue;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "session errored; reconnecting");
@@ -167,6 +192,13 @@ enum SessionError {
     Connect(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("handshake rejected: {0}")]
     HandshakeRejected(String),
+    /// Gateway filed a pair-request to expand scopes; operator must
+    /// approve via `openclaw devices approve <request_id>` before
+    /// this connection can succeed. Carried separately so the
+    /// reconnect loop can back off far longer than a transient
+    /// network failure.
+    #[error("scope-upgrade pairing required (request {request_id})")]
+    ScopeUpgradePending { request_id: String },
     #[error("handshake timeout")]
     HandshakeTimeout,
     #[error("socket closed")]
@@ -267,15 +299,14 @@ async fn session(
     let client_id = "openclaw-tui";
     let client_mode = "ui";
     let role = "operator";
-    // Stay on `operator.read` — adding `operator.approvals` triggers
-    // a scope-upgrade pair request the operator has to approve, and
-    // if they don't, every reconnect files yet another pending
-    // request (flooded the pair-request table once already). The
-    // approval UI's Allow/Deny is therefore cosmetic until the
-    // device is re-paired with approvals scope; a follow-up can
-    // either request the upgrade explicitly or surface the scope
-    // gap in the UI instead of looping.
-    let scopes: &[&str] = &["operator.read"];
+    // Request approvals scope alongside read so
+    // `exec.approval.resolve` RPC calls from the UI actually land. If
+    // the paired device record doesn't yet cover approvals, the
+    // gateway responds `NOT_PAIRED` with `reason: "scope-upgrade"` —
+    // we detect that below and back off long + surface the requestId
+    // in the UI instead of hot-reconnecting (which dedups into one
+    // pair entry, but leaves the app permanently disconnected).
+    let scopes: &[&str] = &["operator.read", "operator.approvals"];
     let mut params_obj = json!({
         "minProtocol": 3,
         "maxProtocol": 3,
@@ -379,8 +410,40 @@ async fn session(
                                     scopes = ?granted,
                                     "gateway connect accepted",
                                 );
+                                // Hand a successful connect to the UI
+                                // and clear any lingering scope-upgrade
+                                // notice.
+                                let _ = out.send(WsEvent::ScopeUpgradePending(None)).await;
                                 let _ = out.send(WsEvent::Connected).await;
                                 break;
+                            }
+                            // Scope-upgrade pair requests are distinct
+                            // from generic handshake failures: the
+                            // gateway will keep rejecting us until the
+                            // operator approves the pair-request, so
+                            // fast reconnection is pointless and would
+                            // flood logs. Tag the error variant so the
+                            // outer loop backs off long and the UI can
+                            // show the requestId.
+                            let details = v
+                                .get("error")
+                                .and_then(|e| e.get("details"));
+                            let err_code = details
+                                .and_then(|d| d.get("code"))
+                                .and_then(Value::as_str);
+                            let reason = details
+                                .and_then(|d| d.get("reason"))
+                                .and_then(Value::as_str);
+                            let request_id = details
+                                .and_then(|d| d.get("requestId"))
+                                .and_then(Value::as_str);
+                            if err_code == Some("PAIRING_REQUIRED")
+                                && reason == Some("scope-upgrade")
+                                && let Some(rid) = request_id
+                            {
+                                return Err(SessionError::ScopeUpgradePending {
+                                    request_id: rid.to_string(),
+                                });
                             }
                             return Err(SessionError::HandshakeRejected(txt.to_string()));
                         }

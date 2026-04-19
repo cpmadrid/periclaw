@@ -44,6 +44,13 @@ pub enum WsEvent {
         total_tokens: i64,
         context_tokens: i64,
     },
+    /// Gateway rejected connect with `NOT_PAIRED / scope-upgrade` —
+    /// the paired device record doesn't cover the scopes we asked
+    /// for. Carries the pair-request id the operator approves via
+    /// `openclaw devices approve <id>`. When `None`, the upgrade
+    /// has been resolved (or wasn't required) and any pending
+    /// indicator should be cleared.
+    ScopeUpgradePending(Option<String>),
     /// Pending exec approval requires operator attention.
     ApprovalRequested(ApprovalEventPayload),
     /// Previously-pending approval has resolved (granted/denied).
