@@ -7,7 +7,7 @@ use iced::widget::{Canvas, canvas};
 use iced::{Element, Length, Subscription, time};
 
 use crate::domain::{Agent, AgentId, AgentKind, AgentStatus, agent};
-use crate::net::events::ActivityKind;
+use crate::net::events::{ActivityKind, GatewayUpdate};
 use crate::net::rpc::ApprovalEventPayload;
 use crate::net::{WsEvent, events, mock, openclaw};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
@@ -54,6 +54,8 @@ pub struct App {
     /// session.message events. Lets the status bar warn when the
     /// main session is near its context ceiling.
     pub session_usage: HashMap<String, SessionUsage>,
+    /// Gateway-side update notification, when one is pending.
+    pub gateway_update: Option<GatewayUpdate>,
     pub scene_cache: canvas::Cache,
 }
 
@@ -76,6 +78,7 @@ impl Default for App {
             last_disconnect: None,
             pending_approvals: HashMap::new(),
             session_usage: HashMap::new(),
+            gateway_update: None,
             scene_cache: canvas::Cache::default(),
         }
     }
@@ -244,6 +247,9 @@ impl App {
                 });
                 self.pending_approvals.insert(key, payload);
             }
+            WsEvent::UpdateAvailable(update) => {
+                self.gateway_update = update;
+            }
             WsEvent::ApprovalResolved { id } => {
                 self.last_poll = Some(Instant::now());
                 if let Some(id) = id.as_deref() {
@@ -332,6 +338,10 @@ impl App {
             last_disconnect: self.last_disconnect.as_deref(),
             main_usage,
             pending_approvals: self.pending_approvals.len(),
+            update: self
+                .gateway_update
+                .as_ref()
+                .map(|u| (u.current.as_str(), u.latest.as_str())),
         });
 
         // The approvals panel is a no-op row (empty iterator) when

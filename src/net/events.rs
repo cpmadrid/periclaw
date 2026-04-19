@@ -52,10 +52,22 @@ pub enum WsEvent {
     ApprovalResolved {
         id: Option<String>,
     },
+    /// Gateway-side update notification (or `None` to clear an
+    /// earlier notification). Surfaces `current → latest` in the
+    /// status bar so the operator sees they can upgrade.
+    UpdateAvailable(Option<GatewayUpdate>),
     /// Connection to the gateway is healthy.
     Connected,
     /// Connection dropped (reason for display).
     Disconnected(String),
+}
+
+/// Gateway-side update notification, emitted via `update.available`.
+#[derive(Debug, Clone)]
+pub struct GatewayUpdate {
+    pub current: String,
+    pub latest: String,
+    pub channel: String,
 }
 
 /// Coarse-grained agent activity signals derived from the `agent` event

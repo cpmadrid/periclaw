@@ -21,6 +21,8 @@ pub struct Snapshot<'a> {
     pub main_usage: Option<(i64, i64)>,
     /// Count of exec approvals awaiting operator decision.
     pub pending_approvals: usize,
+    /// Gateway-side update notification (`current`, `latest`).
+    pub update: Option<(&'a str, &'a str)>,
 }
 
 pub fn view(snap: Snapshot<'_>) -> Element<'_, Message> {
@@ -64,6 +66,11 @@ pub fn view(snap: Snapshot<'_>) -> Element<'_, Message> {
         String::new()
     };
 
+    let update_text = snap
+        .update
+        .map(|(cur, new)| format!("· update {cur} → {new}"))
+        .unwrap_or_default();
+
     container(
         row![
             text(dot).size(12).color(if snap.connected {
@@ -77,6 +84,7 @@ pub fn view(snap: Snapshot<'_>) -> Element<'_, Message> {
             text(age).size(11).color(*theme::MUTED),
             text(ctx_text).size(11).color(ctx_color),
             text(approvals_text).size(11).color(*theme::STATUS_DEGRADED),
+            text(update_text).size(11).color(*theme::STATUS_DEGRADED),
         ]
         .spacing(12)
         .align_y(iced::Alignment::Center),

@@ -66,7 +66,7 @@ use crate::domain::AgentId;
 use crate::net::commands::{self, GatewayCommand};
 use crate::net::WsEvent;
 use crate::net::events::{
-    ActivityKind, agent_stream_to_activity, cron_job_from_event,
+    ActivityKind, GatewayUpdate, agent_stream_to_activity, cron_job_from_event,
 };
 use crate::net::rpc::{
     AgentEventPayload, ApprovalEventPayload, Channel, CronEventPayload, CronJob, MainAgent,
@@ -799,6 +799,37 @@ async fn handle_event(
                 .and_then(Value::as_str)
                 .map(str::to_string);
             let _ = out.send(WsEvent::ApprovalResolved { id }).await;
+        }
+
+        // Gateway-side upgrade notification. Payload shape (from
+        // `openclaw/src/gateway/events.ts:5`):
+        // `{ updateAvailable: { currentVersion, latestVersion, channel } | null }`.
+        "update.available" => {
+            let Some(payload) = payload else { return Ok(()) };
+            let update = payload.get("updateAvailable");
+            let parsed = update.and_then(|u| {
+                // null clears; an object populates.
+                if u.is_null() {
+                    return None;
+                }
+                let current = u.get("currentVersion").and_then(Value::as_str)?;
+                let latest = u.get("latestVersion").and_then(Value::as_str)?;
+                let channel = u.get("channel").and_then(Value::as_str).unwrap_or("stable");
+                Some(GatewayUpdate {
+                    current: current.to_string(),
+                    latest: latest.to_string(),
+                    channel: channel.to_string(),
+                })
+            });
+            if let Some(ref upd) = parsed {
+                tracing::info!(
+                    current = %upd.current,
+                    latest = %upd.latest,
+                    channel = %upd.channel,
+                    "gateway update available",
+                );
+            }
+            let _ = out.send(WsEvent::UpdateAvailable(parsed)).await;
         }
 
         "tick" | "health" | "heartbeat" | "connect.challenge" => {
