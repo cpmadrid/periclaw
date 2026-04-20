@@ -67,8 +67,9 @@ pub fn view<'a>(
     activity: Option<&'a ChatActivityState>,
     input: &'a str,
     connected: bool,
+    unread: &'a std::collections::HashMap<AgentId, usize>,
 ) -> Element<'a, Message> {
-    let picker = picker_column(agents, selected);
+    let picker = picker_column(agents, selected, unread);
     let pane = right_pane(agents, selected, log, activity, input, connected);
 
     row![picker, pane]
@@ -78,7 +79,11 @@ pub fn view<'a>(
         .into()
 }
 
-fn picker_column<'a>(agents: &'a [AgentInfo], selected: &AgentId) -> Element<'a, Message> {
+fn picker_column<'a>(
+    agents: &'a [AgentInfo],
+    selected: &AgentId,
+    unread: &'a std::collections::HashMap<AgentId, usize>,
+) -> Element<'a, Message> {
     // Always include the seeded `main` placeholder even if agents.list
     // hasn't returned yet, so the column isn't empty on first paint.
     let mut rows = column![].spacing(2);
@@ -89,7 +94,11 @@ fn picker_column<'a>(agents: &'a [AgentInfo], selected: &AgentId) -> Element<'a,
         );
     } else {
         for info in agents {
-            rows = rows.push(picker_row(info, selected));
+            let count = unread
+                .get(&AgentId::new(info.id.clone()))
+                .copied()
+                .unwrap_or(0);
+            rows = rows.push(picker_row(info, selected, count));
         }
     }
 
@@ -115,16 +124,28 @@ fn picker_column<'a>(agents: &'a [AgentInfo], selected: &AgentId) -> Element<'a,
     .into()
 }
 
-fn picker_row<'a>(info: &'a AgentInfo, selected: &AgentId) -> Element<'a, Message> {
+fn picker_row<'a>(info: &'a AgentInfo, selected: &AgentId, unread: usize) -> Element<'a, Message> {
     let active = info.id == selected.as_str();
     let label = info.display_with_emoji();
     let agent_id = AgentId::new(info.id.clone());
 
-    let content = text(label).size(13).color(if active {
+    let label_el = text(label).size(13).color(if active {
         *theme::TERMINAL_GREEN
     } else {
         *theme::FOREGROUND
     });
+    let content: Element<'a, Message> = if unread > 0 {
+        row![
+            label_el,
+            Space::new().width(Length::Fill),
+            crate::ui::sidebar::unread_badge(unread),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        label_el.into()
+    };
 
     button(content)
         .on_press(Message::SelectChatAgent(agent_id))

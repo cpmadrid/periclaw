@@ -250,6 +250,13 @@ pub struct App {
     /// view. `None` means no session is selected and the detail
     /// pane shows its placeholder.
     pub active_session_key: Option<String>,
+    /// Per-agent unread message count — incremented on every
+    /// assistant reply that lands while the operator isn't actively
+    /// watching that agent in the Chat tab. Cleared when the
+    /// operator selects the agent (or opens the Chat tab on an
+    /// already-selected agent). Drives the sidebar "Chat (N)"
+    /// badge and per-row badges in the Chat picker.
+    pub unread: HashMap<AgentId, usize>,
     /// Native-OS notification dispatcher. Stays in `App` state so
     /// its dedup sets (seen approvals, notified cron errors) persist
     /// across WsEvent arrivals, which otherwise would refire on
@@ -398,6 +405,7 @@ impl App {
             session_history_fetched: HashSet::new(),
             active_session_key: state.active_session_key.filter(|s| !s.is_empty()),
             session_usage: HashMap::new(),
+            unread: HashMap::new(),
             notifier: Notifier::new(),
             palette_open: false,
             palette_input: String::new(),
@@ -489,6 +497,13 @@ impl App {
                 if self.nav != item {
                     self.nav = item;
                     ui_state::save(&self.ui_state_snapshot());
+                }
+                // Navigating into Chat clears the currently-selected
+                // agent's unread — we assume the operator is now
+                // watching. Other-agent counts survive so a switch
+                // away and back to Chat still shows what was missed.
+                if item == NavItem::Chat {
+                    self.unread.remove(&self.selected_chat_agent);
                 }
                 Task::none()
             }
@@ -593,6 +608,10 @@ impl App {
                 // sense after a switch — clear so the new target's
                 // conversation starts fresh.
                 self.chat_input.clear();
+                // Operator is now watching this agent; drop its
+                // unread count so the sidebar/picker badges clear
+                // immediately.
+                self.unread.remove(&agent_id);
                 // Lazy hydrate: only fire chat.history the first time
                 // we open a given agent per connection.
                 if !self.history_fetched.contains(&agent_id) {
@@ -1097,6 +1116,13 @@ impl App {
                 self.ensure_agent(&agent_id, AgentKind::Main);
                 // Reply lands → activity indicator goes away.
                 self.chat_activities.remove(&agent_id);
+                // Bump unread count if the operator isn't actively
+                // watching this conversation: either on a different
+                // tab, or on Chat but looking at a different agent.
+                let watching = self.nav == NavItem::Chat && self.selected_chat_agent == agent_id;
+                if !watching {
+                    *self.unread.entry(agent_id.clone()).or_insert(0) += 1;
+                }
                 // Chat log gets the full verbatim text — the transcript
                 // view preserves line breaks and length. Bubble uses the
                 // single-line snippet form because sprites can't host
@@ -1423,6 +1449,7 @@ impl App {
                 self.chat_activities.get(&self.selected_chat_agent),
                 &self.chat_input,
                 self.connected,
+                &self.unread,
             ),
             NavItem::Sessions => sessions_view::view(sessions_view::SessionsViewSnapshot {
                 sessions: &self.sessions,
@@ -1441,14 +1468,16 @@ impl App {
             NavItem::Settings => coming_soon("Settings"),
         };
 
-        let base =
-            iced::widget::container(iced::widget::row![sidebar::view(self.nav), main].spacing(0))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_| iced::widget::container::Style {
-                    background: Some((*theme::SURFACE_0).into()),
-                    ..Default::default()
-                });
+        let total_unread: usize = self.unread.values().copied().sum();
+        let base = iced::widget::container(
+            iced::widget::row![sidebar::view(self.nav, total_unread), main].spacing(0),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| iced::widget::container::Style {
+            background: Some((*theme::SURFACE_0).into()),
+            ..Default::default()
+        });
 
         if !self.palette_open {
             return base.into();
