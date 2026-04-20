@@ -1,7 +1,10 @@
 pub mod agent_card;
 pub mod agents_view;
 pub mod approvals;
+pub mod chat_input;
+pub mod chat_view;
 pub mod logs_view;
+pub mod sessions_view;
 pub mod sidebar;
 pub mod status_bar;
 pub mod theme;

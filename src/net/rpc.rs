@@ -56,22 +56,92 @@ pub struct MainAgent {
     pub state: Option<String>,
 }
 
-/// Response of the `agent.identity.get` RPC. Carries the persona
-/// metadata (display name + emoji) that makes the office feel less
-/// anonymous — `main` is really "Sebastian 🦀" to the operator.
+/// One row in the `agents.list` RPC response. Carries everything the
+/// desktop needs to render an agent in the Chat picker + Overview:
+/// stable id, operator-facing name/emoji from the nested `identity`
+/// object, and the model string if configured.
 ///
-/// The WS `agents.list` RPC returns only basic config (id, workspace,
-/// model) — no identity fields — so we pull from `agent.identity.get`
-/// instead, which is the authoritative source backed by
-/// `resolveAssistantIdentity` on the server.
-#[derive(Debug, Clone, Deserialize)]
+/// Populated server-side by `listAgentsForGateway`
+/// (`openclaw/src/gateway/session-utils.ts:652`). Identity is nested
+/// one level (`identity: {name, emoji, avatar, ...}`); we flatten on
+/// display through the `display_*` helpers.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentInfo {
-    #[serde(rename = "agentId")]
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub identity: Option<AgentIdentity>,
+    /// Model ref — the server returns `{primary, fallbacks}` (see
+    /// `resolveGatewayAgentModel` at `session-utils.ts:635`), not a
+    /// plain string. We surface only `primary` via
+    /// [`AgentInfo::primary_model`]; the fallbacks aren't interesting
+    /// to the desktop yet.
+    #[serde(default)]
+    pub model: Option<AgentModelRef>,
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+impl AgentInfo {
+    /// Display-name picked from the richest source available:
+    /// `identity.name` (operator-chosen persona) → `name` (config
+    /// label) → id (fallback).
+    pub fn display_name(&self) -> &str {
+        self.identity
+            .as_ref()
+            .and_then(|i| i.name.as_deref())
+            .or(self.name.as_deref())
+            .unwrap_or(self.id.as_str())
+    }
+
+    /// Full display string including the persona emoji when present —
+    /// e.g. `"Sebastian 🦀"`. Used in the Chat picker and as the
+    /// sprite label on the Overview canvas.
+    pub fn display_with_emoji(&self) -> String {
+        let name = self.display_name();
+        match self.identity.as_ref().and_then(|i| i.emoji.as_deref()) {
+            Some(e) if !e.is_empty() => format!("{name} {e}"),
+            _ => name.to_string(),
+        }
+    }
+
+    /// Primary model ref (e.g. `"anthropic/claude-opus-4-7"`) or
+    /// `None` if none configured. The picker subtitle shows this
+    /// alongside the workspace basename.
+    pub fn primary_model(&self) -> Option<&str> {
+        self.model.as_ref().and_then(|m| m.primary.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentModelRef {
+    #[serde(default)]
+    pub primary: Option<String>,
+    #[serde(default)]
+    pub fallbacks: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentIdentity {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
     pub emoji: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
+}
+
+/// Full `agents.list` response envelope. `default_id` is the agent
+/// the desktop should select first in the Chat picker.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentsListResponse {
+    #[serde(rename = "defaultId")]
+    pub default_id: String,
+    #[serde(default)]
+    pub agents: Vec<AgentInfo>,
 }
 
 /// Gateway broadcast `cron` event. Shape from
@@ -107,15 +177,36 @@ pub struct CronEventPayload {
 }
 
 /// One entry in the `sessions.list` response (and embedded in the
-/// `sessionSnapshot` spread on `session.message` payloads). We only
-/// pull the fields the status bar reads.
+/// `sessionSnapshot` spread on `session.message` payloads). The
+/// status bar reads just the totals; the Sessions view renders the
+/// fuller set.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionInfo {
+    // `sessions.list` names this `key`; `session.message` events
+    // call the same field `sessionKey`. Accept both so a single
+    // struct handles both payload shapes.
+    #[serde(alias = "sessionKey")]
     pub key: String,
     #[serde(default, rename = "totalTokens")]
     pub total_tokens: Option<i64>,
     #[serde(default, rename = "contextTokens")]
     pub context_tokens: Option<i64>,
+    #[serde(default, rename = "inputTokens")]
+    pub input_tokens: Option<i64>,
+    #[serde(default, rename = "outputTokens")]
+    pub output_tokens: Option<i64>,
+    #[serde(default, rename = "updatedAt")]
+    pub updated_at_ms: Option<i64>,
+    #[serde(default, rename = "ageMs")]
+    pub age_ms: Option<i64>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default, rename = "thinkingLevel")]
+    pub thinking_level: Option<String>,
+    #[serde(default, rename = "agentId")]
+    pub agent_id: Option<String>,
 }
 
 /// Response of the `logs.tail` RPC
@@ -138,12 +229,18 @@ pub struct LogTailPayload {
 /// Gateway broadcast `agent` event. Shape from
 /// `openclaw/src/gateway/server-chat.ts` agent-run stream payloads.
 ///
-/// We only need `stream` to classify activity (thinking / tool-calling
-/// / errored); finer-grained per-tool rendering would pull in `data`.
+/// We use `stream` to classify activity (thinking / tool-calling /
+/// errored) and `sessionKey` to route the activity to the right
+/// agent in the UI (so "Sebastian is thinking…" doesn't appear while
+/// a different agent is the one working).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentEventPayload {
     /// `"assistant" | "tool" | "item" | "error" | "lifecycle" | ...`.
     pub stream: String,
+    /// `"agent:<id>:<sid>"`. Optional because some agent events (e.g.
+    /// generic error/lifecycle with no session context) omit it.
+    #[serde(default, rename = "sessionKey")]
+    pub session_key: Option<String>,
 }
 
 /// Gateway broadcast `exec.approval.requested` / `.resolved` payload.
@@ -202,6 +299,42 @@ mod tests {
         let cron: CronJob = serde_json::from_str(json).unwrap();
         assert_eq!(cron.name, "openclaw-auto-update");
         assert_eq!(cron.state.last_status.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn agents_list_parses_sebastian_shape() {
+        // Mirrors the real response from `listAgentsForGateway` —
+        // `model` is a nested `{primary, fallbacks}` object, not a
+        // plain string. An earlier desktop revision declared
+        // `model: Option<String>` and silently dropped every agent
+        // because that deserialize failed; this test pins the shape.
+        let json = r#"
+        {
+            "defaultId": "main",
+            "mainKey": "main",
+            "scope": "per-sender",
+            "agents": [
+                {
+                    "id": "main",
+                    "name": "Sebastian",
+                    "identity": { "name": "Sebastian", "emoji": "🦀" },
+                    "workspace": "/Users/chris/.openclaw",
+                    "model": {
+                        "primary": "anthropic/claude-opus-4-7",
+                        "fallbacks": ["anthropic/claude-sonnet-4-6"]
+                    }
+                }
+            ]
+        }
+        "#;
+        let resp: AgentsListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.default_id, "main");
+        assert_eq!(resp.agents.len(), 1);
+        let a = &resp.agents[0];
+        assert_eq!(a.id, "main");
+        assert_eq!(a.display_name(), "Sebastian");
+        assert_eq!(a.display_with_emoji(), "Sebastian 🦀");
+        assert_eq!(a.primary_model(), Some("anthropic/claude-opus-4-7"));
     }
 
     #[test]

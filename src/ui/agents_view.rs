@@ -16,9 +16,8 @@ use iced::widget::{Space, button, column, container, row, scrollable, text};
 use iced::{Alignment, Border, Element, Length, Padding};
 
 use crate::Message;
-use crate::app::SessionUsage;
 use crate::domain::{Agent, AgentId, AgentKind, AgentStatus};
-use crate::net::rpc::{Channel, CronState};
+use crate::net::rpc::{Channel, CronState, SessionInfo};
 use crate::ui::theme;
 
 pub struct AgentsViewSnapshot<'a> {
@@ -31,7 +30,7 @@ pub struct AgentsViewSnapshot<'a> {
     pub cron_ids: &'a HashMap<AgentId, String>,
     pub channel_details: &'a HashMap<AgentId, Channel>,
     pub active_model: Option<&'a str>,
-    pub session_usage: &'a HashMap<String, SessionUsage>,
+    pub sessions: &'a HashMap<String, SessionInfo>,
 }
 
 pub fn view<'a>(snap: AgentsViewSnapshot<'a>) -> Element<'a, Message> {
@@ -214,11 +213,10 @@ fn main_detail_lines<'a>(snap: &AgentsViewSnapshot<'a>) -> Vec<String> {
     if let Some(model) = snap.active_model {
         lines.push(format!("model: {model}"));
     }
-    if let Some(u) = snap.session_usage.get("agent:main:main") {
-        lines.push(format!(
-            "main session: {} / {} tokens",
-            u.total_tokens, u.context_tokens,
-        ));
+    if let Some(info) = snap.sessions.get("agent:main:main")
+        && let (Some(total), Some(ctx)) = (info.total_tokens, info.context_tokens)
+    {
+        lines.push(format!("main session: {total} / {ctx} tokens"));
     }
     if lines.is_empty() {
         lines.push("no session data yet".into());

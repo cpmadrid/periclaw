@@ -40,15 +40,28 @@ pub fn scope_upgrade_notice(request_id: &str) -> Element<'_, Message> {
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
+    // Without this, the WS session sleeps up to 5 minutes between
+    // reconnect attempts (see `SCOPE_UPGRADE_BACKOFF`) — the operator
+    // would approve the pair-request and then watch the UI stay
+    // disconnected for minutes. The button sends a Reconnect command
+    // that interrupts that sleep.
+    let retry = iced::widget::button(text("Retry now").size(11))
+        .padding(Padding::from([4, 10]))
+        .on_press(Message::RequestReconnect);
+
     let body = column![
         text("Scope upgrade pending").size(12).color(*theme::MUTED),
         text(
             "The gateway has filed a pair-request to grant this \
-             desktop approvals permission. Run this on ubu-3xdv:",
+             desktop approvals permission. Run this on ubu-3xdv, \
+             then click Retry now:",
         )
         .size(12)
         .color(*theme::FOREGROUND),
         command_row,
+        row![Space::new().width(Length::Fill), retry]
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
     ]
     .spacing(6);
 

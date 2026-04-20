@@ -10,7 +10,9 @@ use crate::ui::theme;
 pub fn view(active: NavItem) -> Element<'static, Message> {
     let items = [
         NavItem::Overview,
+        NavItem::Chat,
         NavItem::Agents,
+        NavItem::Sessions,
         NavItem::Logs,
         NavItem::Settings,
     ];
@@ -43,7 +45,9 @@ pub fn view(active: NavItem) -> Element<'static, Message> {
 fn nav_button(item: NavItem, active: bool) -> Element<'static, Message> {
     let label = match item {
         NavItem::Overview => "Overview",
+        NavItem::Chat => "Chat",
         NavItem::Agents => "Agents",
+        NavItem::Sessions => "Sessions",
         NavItem::Logs => "Logs",
         NavItem::Settings => "Settings",
     };

@@ -6,7 +6,7 @@
 use crate::domain::{AgentId, AgentStatus};
 use crate::net::rpc::{
     AgentInfo, ApprovalEventPayload, Channel, CronEventPayload, CronJob, CronState, LogTailPayload,
-    MainAgent,
+    MainAgent, SessionInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -19,12 +19,37 @@ pub enum WsEvent {
     ChannelSnapshot(Vec<Channel>),
     /// Main agent status update.
     MainAgent(MainAgent),
-    /// `agents.list` snapshot — drives roster-display overrides
-    /// (identityName / identityEmoji) so main renders as
-    /// "Sebastian 🦀" instead of the generic "main".
-    AgentsIdentity(Vec<AgentInfo>),
+    /// `agents.list` snapshot — discovery of every chat-capable agent
+    /// plus the server-side default. Drives roster-display overrides
+    /// (Sebastian 🦀, etc.), picker rows in the Chat tab, and the
+    /// initial `selected_chat_agent` on first connect.
+    AgentsList {
+        default_id: String,
+        agents: Vec<AgentInfo>,
+    },
+    /// Rich persona fill-in from `agent.identity.get` — merged on top
+    /// of the less-complete identity that `agents.list` carries. Name
+    /// falls back to the agent id if unset; emoji is optional.
+    AgentIdentity {
+        agent_id: AgentId,
+        name: Option<String>,
+        emoji: Option<String>,
+    },
     /// Real agent chat text — feed directly into a thought bubble.
     AgentMessage { agent_id: AgentId, text: String },
+    /// Agent chose not to reply this turn (OpenClaw `NO_REPLY`
+    /// sentinel). Nothing to render, but we use it to clear the
+    /// chat-activity indicator right away instead of waiting for the
+    /// idle timeout.
+    AgentSilentTurn { agent_id: AgentId },
+    /// Bootstrap chat history for one agent's main session, delivered
+    /// per-agent as the operator switches into each one for the first
+    /// time per connection. Replaces any existing in-memory history
+    /// for that agent with the server's canonical transcript.
+    ChatHistory {
+        agent_id: AgentId,
+        messages: Vec<crate::ui::chat_view::ChatMessage>,
+    },
     /// Tool-invocation text (e.g. `⚙ exec`) — spawns a distinctly
     /// styled bubble so the operator can tell tool calls apart from
     /// conversational messages.
@@ -37,14 +62,10 @@ pub enum WsEvent {
     },
     /// A session summary changed (scope-gated; only arrives with READ scope).
     SessionsChanged,
-    /// Token usage snapshot for a single session — drives the status
-    /// bar's `ctx:` indicator so a 32K-context overflow is visible on
-    /// the desktop instead of surfacing only when the next turn fails.
-    SessionUsage {
-        session_key: String,
-        total_tokens: i64,
-        context_tokens: i64,
-    },
+    /// Snapshot of a single session's metadata (token counts, model,
+    /// last activity, etc.). Drives both the status bar's `ctx:`
+    /// indicator and the full Sessions nav tab.
+    SessionUsage(SessionInfo),
     /// Gateway rejected connect with `NOT_PAIRED / scope-upgrade` —
     /// the paired device record doesn't cover the scopes we asked
     /// for. Carries the pair-request id the operator approves via

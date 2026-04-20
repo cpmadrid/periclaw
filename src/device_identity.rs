@@ -15,12 +15,16 @@
 //!
 //! ## Storage
 //!
-//! Private key: 32-byte Ed25519 signing seed, base64url-encoded, in
-//! the macOS keychain (Keychain `com.sassydog.mission-control-desktop`
-//! / account `openclaw-device-key`). Falls back to
-//! `$XDG_CONFIG_HOME/sassy-dog/device-key` (mode 0600) on Linux
-//! installs without a keyring daemon, matching the token-storage
-//! pattern in `config.rs`.
+//! Private key: 32-byte Ed25519 signing seed, base64url-encoded.
+//! Stored in **both** `$XDG_CONFIG_HOME/sassy-dog/device-key` (mode
+//! 0600) and the OS keychain. Load path checks the file **first** so
+//! `cargo run` re-signs of this binary don't trigger a macOS keychain
+//! access prompt every launch — and more importantly, a dismissed
+//! prompt doesn't silently fall through to generating a *fresh*
+//! keypair (which would force a re-pair on the gateway side, because
+//! the device id changes). The keychain is still written best-effort
+//! so installed builds with a stable code-signing identity benefit
+//! from it when the fallback file is absent.
 //!
 //! Public key is always derived fresh from the signing key at load —
 //! no point storing it separately.
@@ -61,15 +65,29 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// Load the stored keypair or generate a new one. Persists the
-    /// new key to the keychain (or plaintext fallback) on first run.
+    /// Load the stored keypair or generate a new one. Writes the
+    /// new key to both the plaintext fallback file and (best-effort)
+    /// the keychain on first run.
+    ///
+    /// The file is tried first so a dev build whose code signature
+    /// changes every `cargo run` doesn't re-prompt the macOS keychain
+    /// — and doesn't silently regenerate the device id if the operator
+    /// dismisses the prompt.
     pub fn load_or_create() -> Result<Self, IdentityError> {
-        if let Some(key) = try_keyring()? {
-            tracing::debug!(device_id = %device_id_of(&key), "device identity loaded from keychain");
+        if let Some(key) = try_plaintext_fallback()? {
+            tracing::debug!(
+                device_id = %device_id_of(&key),
+                "device identity loaded from fallback file",
+            );
             return Ok(Self::from_signing_key(key));
         }
-        if let Some(key) = try_plaintext_fallback()? {
-            tracing::debug!(device_id = %device_id_of(&key), "device identity loaded from fallback file");
+        if let Some(key) = try_keyring()? {
+            tracing::debug!(device_id = %device_id_of(&key), "device identity loaded from keychain");
+            // Mirror into the fallback file so subsequent runs don't
+            // prompt the keychain at all.
+            if let Err(e) = persist_plaintext_fallback(&key) {
+                tracing::debug!(error = %e, "could not mirror keychain key to fallback file");
+            }
             return Ok(Self::from_signing_key(key));
         }
         let key = generate_signing_key();
@@ -78,16 +96,15 @@ impl DeviceIdentity {
             device_id = %ident.device_id,
             "generated new device identity — pair via Control UI to activate",
         );
-        match persist_keyring(&key) {
-            Ok(()) => tracing::info!("device key persisted to keychain"),
-            Err(e) => {
-                tracing::warn!(error = %e, "keyring persist failed; writing plaintext fallback");
-                persist_plaintext_fallback(&key)?;
-                tracing::info!(
-                    path = ?fallback_path().ok(),
-                    "device key persisted to plaintext fallback",
-                );
-            }
+        // Write to the fallback file. Keychain write is skipped — on
+        // macOS dev builds the signature changes every `cargo run`
+        // and a keychain write prompts for the login password. The
+        // read path still consults the keychain so any device key
+        // stashed by an older build keeps working.
+        if let Err(e) = persist_plaintext_fallback(&key) {
+            tracing::warn!(error = %e, "fallback file persist failed");
+        } else {
+            tracing::info!(path = ?fallback_path().ok(), "device key persisted to fallback file");
         }
         Ok(ident)
     }
@@ -185,12 +202,6 @@ fn try_keyring() -> Result<Option<SigningKey>, IdentityError> {
             Ok(None)
         }
     }
-}
-
-fn persist_keyring(key: &SigningKey) -> Result<(), IdentityError> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)?;
-    entry.set_password(&URL_SAFE_NO_PAD.encode(key.to_bytes()))?;
-    Ok(())
 }
 
 fn try_plaintext_fallback() -> Result<Option<SigningKey>, IdentityError> {

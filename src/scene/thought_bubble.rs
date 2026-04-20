@@ -37,6 +37,10 @@ pub enum BubbleKind {
     /// operator can tell at a glance whether the agent is talking
     /// vs. reaching for a tool. Same lifetime as Message.
     Tool,
+    /// Operator-typed prompt being sent to the agent. Same lifetime
+    /// as Message but colored distinctly so the operator can tell
+    /// their own message apart from the agent's reply.
+    Outgoing,
 }
 
 impl ThoughtBubble {
@@ -70,17 +74,29 @@ impl ThoughtBubble {
         }
     }
 
+    /// Constructor for outgoing operator prompts — same lifetime as
+    /// `message`, rendered in a distinct color so the operator can
+    /// see what they sent before the agent's reply lands.
+    pub fn outgoing(agent: AgentId, text: impl Into<String>) -> Self {
+        Self {
+            agent,
+            text: text.into(),
+            born: Instant::now(),
+            kind: BubbleKind::Outgoing,
+        }
+    }
+
     fn ttl(&self) -> Duration {
         match self.kind {
             BubbleKind::Status => TTL,
-            BubbleKind::Message | BubbleKind::Tool => MESSAGE_TTL,
+            BubbleKind::Message | BubbleKind::Tool | BubbleKind::Outgoing => MESSAGE_TTL,
         }
     }
 
     fn fade_start(&self) -> Duration {
         match self.kind {
             BubbleKind::Status => FADE_START,
-            BubbleKind::Message | BubbleKind::Tool => MESSAGE_FADE_START,
+            BubbleKind::Message | BubbleKind::Tool | BubbleKind::Outgoing => MESSAGE_FADE_START,
         }
     }
 

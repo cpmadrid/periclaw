@@ -1,16 +1,22 @@
 //! Token bootstrap and config paths.
 //!
-//! **Keyring first**: on subsequent runs the token is fetched from the
-//! OS keychain (Keychain on macOS, Secret Service on Linux).
+//! **Lookup order** (first hit wins):
+//! 1. `OPENCLAW_TOKEN` env var — the Doppler-injected source of truth
+//!    in this project; when present we never fall through.
+//! 2. Plaintext fallback file at `$XDG_CONFIG_HOME/sassy-dog/gateway-token`
+//!    (mode 0600).
+//! 3. OS keychain — only a read path, kept for backward-compat with
+//!    installs that stashed here under older builds.
+//! 4. Bootstrap from `~/.openclaw/openclaw.json` → `auth.token`.
 //!
-//! **First-run bootstrap**: if keyring lookup fails, we read the token
-//! from `~/.openclaw/openclaw.json` → `auth.token` and stash it in the
-//! keyring for next time.
-//!
-//! **Headless Linux fallback**: if the keyring is unavailable (no
-//! `secret-service` daemon on a bare ubu-3xdv wall-display install),
-//! fall back to plaintext `$XDG_CONFIG_HOME/sassy-dog/token` with
-//! mode 0600.
+//! **Writes go to the file, not the keychain.** On macOS dev builds
+//! the code-signing identity changes every `cargo run`, so the OS
+//! treats a keychain write as a fresh app asking for confidential
+//! access and prompts for the login password — every launch. Writing
+//! to a 0600 file under the user's config dir matches OpenClaw's own
+//! secrets layout and avoids the prompt entirely. The keychain read
+//! path is still consulted so an older install with a stashed token
+//! keeps working until it's migrated.
 
 use std::fs;
 use std::path::PathBuf;
@@ -82,30 +88,20 @@ pub fn try_load_token() -> Option<String> {
     }
 }
 
-/// Load the OpenClaw gateway token, bootstrapping to the keyring on first run.
-///
-/// Order of operations:
-/// 1. If `OPENCLAW_TOKEN` env var is set, use it and seed the keyring.
-/// 2. Try the keyring.
-/// 3. Try the plaintext fallback file at `$XDG_CONFIG_HOME/sassy-dog/token`.
-/// 4. Try reading from `~/.openclaw/openclaw.json` → `auth.token`
-///    (and migrate into the keyring for next time).
+/// Load the OpenClaw gateway token. See module docs for the lookup
+/// order. Writes persist to the plaintext fallback file (0600); the
+/// keychain is read-only to avoid prompting on macOS dev builds.
 pub fn load_token() -> Result<String, ConfigError> {
     if let Ok(tok) = std::env::var("OPENCLAW_TOKEN") {
         let tok = tok.trim().to_string();
         if !tok.is_empty() {
-            tracing::info!("OPENCLAW_TOKEN env var provided; seeding keyring");
-            if let Err(e) = stash_in_keyring(&tok) {
-                tracing::warn!(error = %e, "keyring stash failed; writing plaintext fallback");
-                write_plaintext_fallback(&tok)?;
-            }
+            // Env var is the Doppler-injected source of truth — use
+            // it directly. No stash: writing to the keychain here
+            // triggers a login-password prompt on every dev launch
+            // because the binary signature changes with each build.
+            tracing::debug!("OPENCLAW_TOKEN env var provided");
             return Ok(tok);
         }
-    }
-
-    if let Some(tok) = try_keyring() {
-        tracing::debug!("token loaded from keyring");
-        return Ok(tok);
     }
 
     if let Some(tok) = try_plaintext_fallback()? {
@@ -113,14 +109,22 @@ pub fn load_token() -> Result<String, ConfigError> {
         return Ok(tok);
     }
 
-    tracing::info!("bootstrapping token from ~/.openclaw/openclaw.json");
-    let tok = read_openclaw_config()?;
-
-    if let Err(e) = stash_in_keyring(&tok) {
-        tracing::warn!(error = %e, "keyring stash failed; writing plaintext fallback");
-        write_plaintext_fallback(&tok)?;
+    if let Some(tok) = try_keyring() {
+        tracing::debug!("token loaded from keyring (legacy install)");
+        // Mirror into the file so the next launch doesn't consult
+        // the keychain at all — best-effort; the legacy read path
+        // still works if this fails.
+        if let Err(e) = write_plaintext_fallback(&tok) {
+            tracing::debug!(error = %e, "could not mirror keychain token to fallback file");
+        }
+        return Ok(tok);
     }
 
+    tracing::info!("bootstrapping token from ~/.openclaw/openclaw.json");
+    let tok = read_openclaw_config()?;
+    if let Err(e) = write_plaintext_fallback(&tok) {
+        tracing::warn!(error = %e, "could not persist bootstrapped token to fallback file");
+    }
     Ok(tok)
 }
 
@@ -128,12 +132,6 @@ fn try_keyring() -> Option<String> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
         .ok()
         .and_then(|entry| entry.get_password().ok())
-}
-
-fn stash_in_keyring(token: &str) -> Result<(), ConfigError> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)?;
-    entry.set_password(token)?;
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

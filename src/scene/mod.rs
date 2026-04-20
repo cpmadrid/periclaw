@@ -1,5 +1,6 @@
 pub mod office;
 pub mod room;
+pub mod sprite;
 pub mod thought_bubble;
 
 pub use office::OfficeScene;

@@ -63,6 +63,18 @@ impl Agent {
         }
     }
 
+    /// Constructor for a non-default Main agent discovered via
+    /// `agents.list`. The seed roster only contains `"main"`; any
+    /// additional chat-capable agent comes in this way so it gets a
+    /// sprite on the Overview scene and a row in the Chat picker.
+    pub fn main_with_display(id: impl Into<String>, display: impl Into<String>) -> Self {
+        Self {
+            id: AgentId::new(id.into()),
+            display: display.into(),
+            kind: AgentKind::Main,
+        }
+    }
+
     pub fn color(&self) -> Color {
         // Main is the signature bright green; everything else gets a
         // deterministic ghost color derived from the id so renames stay

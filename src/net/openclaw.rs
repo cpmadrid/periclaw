@@ -54,7 +54,7 @@ use futures_util::{SinkExt, StreamExt};
 use iced::futures::Stream;
 use iced::stream;
 use serde_json::{Value, json};
-use tokio::time::{Instant, sleep, sleep_until};
+use tokio::time::{Instant, sleep_until, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -176,11 +176,14 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
                             "awaiting scope-upgrade approval ({request_id})"
                         )))
                         .await;
-                    // Hot-reconnecting re-ackowledges the same
+                    // Hot-reconnecting re-acknowledges the same
                     // requestId without progress and spams logs. Wait
                     // a long human-paced interval — the operator has
-                    // to go run `openclaw devices approve <id>`.
-                    sleep(SCOPE_UPGRADE_BACKOFF).await;
+                    // to go run `openclaw devices approve <id>`. Any
+                    // inbound command (practically: the "Retry now"
+                    // button sending `Reconnect`) short-circuits the
+                    // wait so approvals take effect immediately.
+                    wait_or_command(SCOPE_UPGRADE_BACKOFF, &mut cmd_rx).await;
                     continue;
                 }
                 Err(e) => {
@@ -189,7 +192,7 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
                 }
             }
 
-            sleep(backoff).await;
+            wait_or_command(backoff, &mut cmd_rx).await;
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     })
@@ -492,18 +495,22 @@ async fn session(
     // in sync as the main session grows.
     rpc_id += 1;
     send_rpc(&mut socket, rpc_id, "sessions.list").await?;
-    // Pull `agent.identity.get` so the roster can swap the placeholder
-    // "main" display for the operator-chosen persona (name + emoji).
-    // The WS `agents.list` response omits identity — this one is
-    // backed by `resolveAssistantIdentity` on the server.
+    // Discover every chat-capable agent in one call — id, identity
+    // (name/emoji), model, workspace. Replaces the older
+    // `agent.identity.get {agentId: "main"}` bootstrap: that one only
+    // fetched the single default agent, which made a multi-agent
+    // picker impossible. `agents.list` (see
+    // `openclaw/src/gateway/server-methods/agents.ts:427`) returns the
+    // full set plus a `defaultId` pointing at the agent the desktop
+    // should select first.
     rpc_id += 1;
-    send_rpc_params(
-        &mut socket,
-        rpc_id,
-        "agent.identity.get",
-        json!({ "agentId": "main" }),
-    )
-    .await?;
+    send_rpc(&mut socket, rpc_id, "agents.list").await?;
+    // Note: `chat.history` is NOT fired at bootstrap anymore — the
+    // app selects the default agent from the agents.list response and
+    // then dispatches `GatewayCommand::FetchChatHistory` for it, which
+    // routes through the same command channel as SendChat. That keeps
+    // bootstrap cheap when an install has many agents and avoids an
+    // unnecessary round-trip for agents the operator never opens.
 
     // UUID → human-readable cron name cache, populated from the
     // snapshot and consulted when cron events arrive. Empty until
@@ -519,6 +526,13 @@ async fn session(
     // on a long session.
     let mut seen_message_ids: std::collections::VecDeque<String> =
         std::collections::VecDeque::with_capacity(32);
+
+    // In-flight `chat.history` RPC ids → agent ids. chat.history's
+    // response payload doesn't echo the sessionKey, so we remember
+    // the agent we're asking about at send time and tag the
+    // corresponding `ChatHistory` event when the res comes back.
+    let mut pending_history: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     // Channel state isn't broadcast as a push event, so we refresh it
     // on a low-cadence heartbeat over the same socket. No cron poll —
@@ -550,7 +564,14 @@ async fn session(
             msg = socket.next() => {
                 match msg {
                     Some(Ok(WsMsg::Text(txt))) => {
-                        handle_frame(&txt, out, &mut cron_id_to_name, &mut seen_message_ids, &mut log_cursor).await?;
+                        handle_frame(
+                            &txt,
+                            out,
+                            &mut cron_id_to_name,
+                            &mut seen_message_ids,
+                            &mut log_cursor,
+                            &mut pending_history,
+                        ).await?;
                     }
                     Some(Ok(WsMsg::Ping(p))) => {
                         let _ = socket.send(WsMsg::Pong(p)).await;
@@ -563,16 +584,59 @@ async fn session(
                 }
             }
             Some(cmd) = cmd_rx.recv() => {
-                rpc_id += 1;
-                send_command_rpc(&mut socket, rpc_id, &cmd).await?;
+                match cmd {
+                    // No-op when the session is already live. The
+                    // button that sends this only renders while
+                    // disconnected, so a live-session Reconnect is
+                    // an edge case (e.g. racing with a just-accepted
+                    // handshake) — drop it.
+                    GatewayCommand::Reconnect => {
+                        tracing::debug!("Reconnect received on live session; ignoring");
+                    }
+                    GatewayCommand::FetchChatHistory { ref agent_id } => {
+                        // Remember which agent this id is for so the
+                        // `res` handler can tag the emitted event.
+                        rpc_id += 1;
+                        pending_history.insert(rpc_id.to_string(), agent_id.clone());
+                        send_command_rpc(&mut socket, rpc_id, &cmd).await?;
+                    }
+                    _ => {
+                        rpc_id += 1;
+                        send_command_rpc(&mut socket, rpc_id, &cmd).await?;
+                    }
+                }
             }
+        }
+    }
+}
+
+/// Wait `duration`, returning early if a command arrives. The
+/// specific command doesn't matter — any signal from the UI wakes
+/// the reconnect loop. In practice the UI only sends `Reconnect`
+/// while disconnected (cron/approval buttons aren't rendered then).
+async fn wait_or_command(
+    duration: Duration,
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<GatewayCommand>,
+) {
+    match timeout(duration, cmd_rx.recv()).await {
+        Ok(Some(cmd)) => {
+            tracing::info!(?cmd, "reconnect wait interrupted by UI command");
+        }
+        Ok(None) => {
+            // Sender dropped — channel closed. Nothing to do; the
+            // outer loop will keep retrying anyway.
+        }
+        Err(_) => {
+            // Timeout — normal scheduled wake-up.
         }
     }
 }
 
 /// Pure helper — build the RPC frame JSON for a UI command. Split
 /// from the socket-sending path so the envelope can be unit-tested
-/// against gateway schemas without a live WS.
+/// against gateway schemas without a live WS. Panics on `Reconnect`,
+/// which is a control-plane signal handled by the outer loop and
+/// should never reach here.
 fn build_command_frame(id: u64, cmd: &GatewayCommand) -> (&'static str, Value) {
     let (method, params) = match cmd {
         GatewayCommand::ResolveApproval {
@@ -588,6 +652,36 @@ fn build_command_frame(id: u64, cmd: &GatewayCommand) -> (&'static str, Value) {
             // now regardless of schedule.
             json!({ "id": job_id, "mode": "force" }),
         ),
+        GatewayCommand::SendChat {
+            agent_id,
+            message,
+            idempotency_key,
+        } => (
+            "chat.send",
+            // Schema: `protocol/schema/logs-chat.ts:35` — sessionKey +
+            // message + idempotencyKey are the required fields. We
+            // use the fully-qualified `agent:<id>:main` form for every
+            // agent (including the default) so routing is uniform —
+            // the bare `"main"` shorthand only works for the default.
+            json!({
+                "sessionKey": agent_main_session_key(agent_id),
+                "message": message,
+                "idempotencyKey": idempotency_key,
+            }),
+        ),
+        GatewayCommand::FetchChatHistory { agent_id } => (
+            "chat.history",
+            json!({
+                "sessionKey": agent_main_session_key(agent_id),
+                "limit": 200,
+            }),
+        ),
+        GatewayCommand::FetchAgentIdentity { agent_id } => {
+            ("agent.identity.get", json!({ "agentId": agent_id }))
+        }
+        GatewayCommand::Reconnect => {
+            unreachable!("Reconnect is handled in the session select arm, never sent as RPC")
+        }
     };
     let frame = json!({
         "type": "req",
@@ -643,12 +737,65 @@ async fn send_rpc_params(
         .map_err(|e| SessionError::Send(e.to_string()))
 }
 
+/// Build the gateway sessionKey for an agent's main chat session.
+/// Mirrors `buildAgentMainSessionKey` at
+/// `openclaw/src/routing/session-key.ts:120`. The bare `"main"`
+/// shorthand only addresses the default agent; the full form works
+/// for every agent including the default, so we use it uniformly.
+fn agent_main_session_key(agent_id: &str) -> String {
+    format!("agent:{agent_id}:main")
+}
+
+/// Is this assistant text one of OpenClaw's silent-reply sentinels
+/// (`NO_REPLY` / `HEARTBEAT_OK`)? Mirrors `isSilentReplyText` +
+/// `isSilentReplyEnvelopeText` in `openclaw/src/auto-reply/tokens.ts`
+/// — the server suppresses these before delivering to external
+/// channels, but `session.message` broadcasts carry the raw text, so
+/// we filter client-side. Case-insensitive, tolerant of surrounding
+/// whitespace and the `{"action":"NO_REPLY"}` envelope form.
+pub(crate) fn is_silent_reply(text: &str) -> bool {
+    const SENTINELS: &[&str] = &["NO_REPLY", "HEARTBEAT_OK"];
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    for token in SENTINELS {
+        if trimmed.eq_ignore_ascii_case(token) {
+            return true;
+        }
+        // `{"action":"NO_REPLY"}` envelope form. We don't parse JSON
+        // for this — a lightweight string check is enough since the
+        // surrounding code only uses the result as a yes/no gate.
+        if trimmed.starts_with('{')
+            && trimmed.ends_with('}')
+            && trimmed.to_ascii_uppercase().contains(token)
+            && trimmed.contains("\"action\"")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extract the `agent_id` portion from a `session.message` sessionKey
+/// of the form `"agent:<id>:<sessionId>"`. Returns `None` for keys
+/// that don't match the canonical shape, so older / legacy keys fall
+/// through to the caller's default.
+pub(crate) fn agent_id_from_session_key(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("agent:")?;
+    // `rest` = `"<agentId>:<sessionId>"`. Split at the first colon.
+    let end = rest.find(':')?;
+    let id = &rest[..end];
+    (!id.is_empty()).then_some(id)
+}
+
 async fn handle_frame(
     txt: &str,
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
     cron_id_to_name: &mut std::collections::HashMap<String, String>,
     seen_message_ids: &mut std::collections::VecDeque<String>,
     log_cursor: &mut Option<i64>,
+    pending_history: &mut std::collections::HashMap<String, String>,
 ) -> Result<(), SessionError> {
     let frame: Value = serde_json::from_str(txt)?;
 
@@ -670,7 +817,16 @@ async fn handle_frame(
             let Some(payload) = frame.get("payload") else {
                 return Ok(());
             };
-            tracing::trace!(id = %res_id, "gateway res ok");
+            // Log any res that carries a `status` at info — most
+            // stateful RPC acks (chat.send → "started", cron.run →
+            // "queued", etc.) use this shape, and surfacing them
+            // at the default log level turns silent send-but-nothing
+            // symptoms into a visible "gateway said X" line.
+            if let Some(status) = payload.get("status").and_then(Value::as_str) {
+                tracing::info!(id = %res_id, status, "gateway res ok");
+            } else {
+                tracing::trace!(id = %res_id, "gateway res ok");
+            }
 
             if let Some(crons) = try_cron_list(payload) {
                 tracing::debug!(count = crons.len(), "cron snapshot");
@@ -690,23 +846,58 @@ async fn handle_frame(
                 let _ = out.send(WsEvent::LogTail(tail)).await;
                 return Ok(());
             }
-            if let Some(agents) = try_agents_list(payload) {
-                tracing::info!(count = agents.len(), "agents list");
-                let _ = out.send(WsEvent::AgentsIdentity(agents)).await;
+            if let Some(identity) = try_agent_identity(payload) {
+                let (agent_id, name, emoji) = identity;
+                tracing::info!(
+                    agent = %agent_id,
+                    name = ?name,
+                    emoji = ?emoji,
+                    "agent identity",
+                );
+                let _ = out
+                    .send(WsEvent::AgentIdentity {
+                        agent_id: crate::domain::AgentId::new(agent_id),
+                        name,
+                        emoji,
+                    })
+                    .await;
+                return Ok(());
+            }
+            if let Some((default_id, agents)) = try_agents_list(payload) {
+                tracing::info!(
+                    count = agents.len(),
+                    default = %default_id,
+                    "agents list",
+                );
+                let _ = out.send(WsEvent::AgentsList { default_id, agents }).await;
+                return Ok(());
+            }
+            if let Some(history) = try_chat_history(payload) {
+                // chat.history responses don't echo the sessionKey, so
+                // we recover the agent id from the request-id → agent
+                // map we stamped at send time. If the id is missing
+                // (stale/unknown), fall back to the default agent so
+                // the history still lands somewhere sensible.
+                let agent_id = pending_history
+                    .remove(res_id)
+                    .unwrap_or_else(|| "main".to_string());
+                tracing::info!(
+                    count = history.len(),
+                    agent = %agent_id,
+                    "chat history bootstrap",
+                );
+                let _ = out
+                    .send(WsEvent::ChatHistory {
+                        agent_id: crate::domain::AgentId::new(agent_id),
+                        messages: history,
+                    })
+                    .await;
                 return Ok(());
             }
             if let Some(sessions) = try_session_list(payload) {
                 tracing::debug!(count = sessions.len(), "session list");
                 for s in sessions {
-                    if let (Some(total), Some(ctx)) = (s.total_tokens, s.context_tokens) {
-                        let _ = out
-                            .send(WsEvent::SessionUsage {
-                                session_key: s.key,
-                                total_tokens: total,
-                                context_tokens: ctx,
-                            })
-                            .await;
-                    }
+                    let _ = out.send(WsEvent::SessionUsage(s)).await;
                 }
                 return Ok(());
             }
@@ -804,7 +995,18 @@ async fn handle_event(
                 }
             };
             if let Some(kind) = agent_stream_to_activity(&evt.stream) {
-                send_activity(out, kind).await;
+                let agent_id = evt
+                    .session_key
+                    .as_deref()
+                    .and_then(agent_id_from_session_key)
+                    .unwrap_or(CHAT_AGENT_ID)
+                    .to_string();
+                let _ = out
+                    .send(WsEvent::AgentActivity {
+                        agent_id: AgentId::new(agent_id),
+                        kind,
+                    })
+                    .await;
             }
         }
 
@@ -856,30 +1058,59 @@ async fn handle_event(
                     seen_message_ids.pop_front();
                 }
             }
-            // Pick off the session-usage snapshot that the gateway
-            // spreads into this payload — lets the status bar track
-            // context growth without a separate poll.
-            if let Some(session_key) = payload.get("sessionKey").and_then(Value::as_str) {
-                let total = payload.get("totalTokens").and_then(Value::as_i64);
-                let ctx = payload.get("contextTokens").and_then(Value::as_i64);
-                if let (Some(total), Some(ctx)) = (total, ctx) {
-                    let _ = out
-                        .send(WsEvent::SessionUsage {
-                            session_key: session_key.to_string(),
-                            total_tokens: total,
-                            context_tokens: ctx,
-                        })
-                        .await;
-                }
+            // The gateway spreads the same session-snapshot fields
+            // that `sessions.list` returns into this payload, so we
+            // can update the per-session view without a separate
+            // poll. Reuse `SessionInfo`'s deserializer — extra
+            // fields on `session.message` are ignored by serde.
+            if let Ok(info) =
+                serde_json::from_value::<crate::net::rpc::SessionInfo>(payload.clone())
+                && !info.key.is_empty()
+            {
+                let _ = out.send(WsEvent::SessionUsage(info)).await;
             }
             let text = extract_message_text(payload);
             if text.trim().is_empty() {
                 return Ok(());
             }
-            tracing::debug!(len = text.len(), "session.message assistant");
+            // Route by sessionKey so a reply from a non-default agent
+            // lands in the right chat log / over the right sprite.
+            // Fallback to `main` if the key is missing or malformed —
+            // older gateway builds and some internal tests don't set
+            // it on every broadcast.
+            let session_key = payload
+                .get("sessionKey")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let agent_id_str = agent_id_from_session_key(session_key)
+                .unwrap_or(CHAT_AGENT_ID)
+                .to_string();
+            // Silent-reply sentinel handling: the server itself
+            // suppresses `NO_REPLY` when delivering to external
+            // channels, but `session.message` broadcasts carry the
+            // raw assistant content. Strip / detect it client-side
+            // so it doesn't render as a bubble or log entry.
+            if is_silent_reply(&text) {
+                tracing::debug!(
+                    agent = %agent_id_str,
+                    "session.message silent-reply sentinel — skipping render",
+                );
+                let _ = out
+                    .send(WsEvent::AgentSilentTurn {
+                        agent_id: AgentId::new(agent_id_str),
+                    })
+                    .await;
+                return Ok(());
+            }
+            tracing::debug!(
+                len = text.len(),
+                agent = %agent_id_str,
+                session_key,
+                "session.message assistant",
+            );
             let _ = out
                 .send(WsEvent::AgentMessage {
-                    agent_id: AgentId::new(CHAT_AGENT_ID),
+                    agent_id: AgentId::new(agent_id_str),
                     text,
                 })
                 .await;
@@ -902,16 +1133,28 @@ async fn handle_event(
                 .and_then(|d| d.get("name").or_else(|| d.get("tool")))
                 .and_then(Value::as_str)
                 .unwrap_or("tool");
-            tracing::debug!(phase, tool = tool_name, "session.tool");
+            let session_key = payload
+                .get("sessionKey")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let agent_id = agent_id_from_session_key(session_key)
+                .unwrap_or(CHAT_AGENT_ID)
+                .to_string();
+            tracing::debug!(phase, tool = tool_name, agent = %agent_id, "session.tool");
             if phase == "start" {
                 let _ = out
                     .send(WsEvent::AgentToolInvoked {
-                        agent_id: AgentId::new(CHAT_AGENT_ID),
+                        agent_id: AgentId::new(agent_id.clone()),
                         text: format!("⚙ {tool_name}"),
                     })
                     .await;
             }
-            send_activity(out, ActivityKind::ToolCalling).await;
+            let _ = out
+                .send(WsEvent::AgentActivity {
+                    agent_id: AgentId::new(agent_id),
+                    kind: ActivityKind::ToolCalling,
+                })
+                .await;
         }
 
         // Scoped (APPROVALS_SCOPE): exec approvals for the operator.
@@ -978,18 +1221,6 @@ async fn handle_event(
     }
 
     Ok(())
-}
-
-async fn send_activity(
-    out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
-    kind: ActivityKind,
-) {
-    let _ = out
-        .send(WsEvent::AgentActivity {
-            agent_id: AgentId::new(CHAT_AGENT_ID),
-            kind,
-        })
-        .await;
 }
 
 /// Pull human-readable text out of a `session.message` payload's
@@ -1104,14 +1335,115 @@ fn try_log_tail(v: &Value) -> Option<LogTailPayload> {
     serde_json::from_value(v.clone()).ok()
 }
 
-fn try_agents_list(v: &Value) -> Option<Vec<AgentInfo>> {
-    // `agent.identity.get` returns a single object:
-    // `{agentId, name, avatar, emoji?}`. The presence of `agentId`
-    // (as opposed to plain `id`) is our signal — other RPC responses
-    // don't use that key.
-    if v.get("agentId").is_some() {
-        let info: AgentInfo = serde_json::from_value(v.clone()).ok()?;
-        return Some(vec![info]);
+/// `agent.identity.get` response shape: `{agentId, name, avatar, emoji?}`.
+/// The top-level `agentId` is our detection signal — neither
+/// `agents.list` (uses `defaultId`+`agents`) nor any other response we
+/// care about carries that exact key at the root.
+fn try_agent_identity(v: &Value) -> Option<(String, Option<String>, Option<String>)> {
+    let agent_id = v.get("agentId").and_then(Value::as_str)?.to_string();
+    if agent_id.is_empty() {
+        return None;
+    }
+    let name = v
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
+    let emoji = v
+        .get("emoji")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|s| !s.is_empty());
+    Some((agent_id, name, emoji))
+}
+
+fn try_agents_list(v: &Value) -> Option<(String, Vec<AgentInfo>)> {
+    // `agents.list` returns `{defaultId, mainKey, scope, agents: [...]}`.
+    // Presence of `defaultId` + the `agents` array is our signal —
+    // keeps us out of the way of `sessions.list` (which carries
+    // `sessions: [...]`) and of other `agents`-prefixed RPCs that
+    // might arrive in future. `AgentsListResponse` accepts any shape
+    // that has those two keys thanks to `#[serde(default)]` on
+    // everything else.
+    if v.get("defaultId").is_none() || !v.get("agents").is_some_and(Value::is_array) {
+        return None;
+    }
+    let resp: crate::net::rpc::AgentsListResponse = serde_json::from_value(v.clone()).ok()?;
+    Some((resp.default_id, resp.agents))
+}
+
+fn try_chat_history(v: &Value) -> Option<Vec<crate::ui::chat_view::ChatMessage>> {
+    use crate::ui::chat_view::{ChatMessage, ChatRole};
+
+    let arr = v.get("messages").and_then(Value::as_array)?;
+    // `messages` is a shared key — reject when the entries don't
+    // look like chat messages at all (no role field anywhere) so a
+    // future RPC that happens to return `{messages: [...]}` in a
+    // different shape doesn't get mis-routed here.
+    if !arr
+        .iter()
+        .any(|m| m.get("role").and_then(Value::as_str).is_some())
+    {
+        return None;
+    }
+    let history: Vec<ChatMessage> = arr
+        .iter()
+        .filter_map(|m| {
+            let role_str = m.get("role").and_then(Value::as_str)?;
+            let role = match role_str {
+                "user" => ChatRole::User,
+                "assistant" => ChatRole::Assistant,
+                _ => ChatRole::Other,
+            };
+            let text = flatten_message_content(m)?;
+            if text.trim().is_empty() {
+                return None;
+            }
+            // Drop silent-reply sentinels — they're agent "stay
+            // quiet" signals, not content. Without this the Chat
+            // tab bootstrap renders a wall of `NO_REPLY` rows for
+            // agents that chose silence on past turns.
+            if is_silent_reply(&text) {
+                return None;
+            }
+            Some(ChatMessage {
+                role,
+                text,
+                at: std::time::SystemTime::now(),
+            })
+        })
+        .collect();
+    Some(history)
+}
+
+/// Pull the text out of a chat-history entry. OpenClaw's
+/// `chat.history` returns a union shape — either `content: "..."` or
+/// `content: [{type: "text", text: "..."}, ...]` (or the legacy
+/// top-level `text` field). Join text chunks and drop non-text blocks
+/// so the UI renders a single clean string.
+fn flatten_message_content(message: &Value) -> Option<String> {
+    if let Some(s) = message.get("content").and_then(Value::as_str) {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = message.get("content").and_then(Value::as_array) {
+        let joined = arr
+            .iter()
+            .filter_map(|chunk| {
+                let kind = chunk.get("type").and_then(Value::as_str)?;
+                if kind != "text" {
+                    return None;
+                }
+                chunk
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        return Some(joined);
+    }
+    if let Some(s) = message.get("text").and_then(Value::as_str) {
+        return Some(s.to_string());
     }
     None
 }
@@ -1142,6 +1474,80 @@ fn try_main_agent(v: &Value) -> Option<MainAgent> {
 #[cfg(test)]
 mod command_rpc_tests {
     use super::*;
+
+    #[test]
+    fn send_chat_frame_uses_agent_scoped_session_key() {
+        let cmd = GatewayCommand::SendChat {
+            agent_id: "memoria".into(),
+            message: "hello memoria".into(),
+            idempotency_key: "idem-42".into(),
+        };
+        let (method, frame) = build_command_frame(7, &cmd);
+        assert_eq!(method, "chat.send");
+        // Matches `buildAgentMainSessionKey`
+        // (openclaw/src/routing/session-key.ts:120).
+        assert_eq!(frame["params"]["sessionKey"], "agent:memoria:main");
+        assert_eq!(frame["params"]["message"], "hello memoria");
+        assert_eq!(frame["params"]["idempotencyKey"], "idem-42");
+    }
+
+    #[test]
+    fn send_chat_frame_for_default_agent_uses_full_form() {
+        // Even for the default ("main") agent we send the full
+        // `agent:main:main` sessionKey instead of the legacy shorthand
+        // so inbound `session.message` routing is symmetric.
+        let cmd = GatewayCommand::SendChat {
+            agent_id: "main".into(),
+            message: "hi".into(),
+            idempotency_key: "k".into(),
+        };
+        let (_, frame) = build_command_frame(1, &cmd);
+        assert_eq!(frame["params"]["sessionKey"], "agent:main:main");
+    }
+
+    #[test]
+    fn fetch_chat_history_frame_targets_agent_session() {
+        let cmd = GatewayCommand::FetchChatHistory {
+            agent_id: "docs".into(),
+        };
+        let (method, frame) = build_command_frame(9, &cmd);
+        assert_eq!(method, "chat.history");
+        assert_eq!(frame["params"]["sessionKey"], "agent:docs:main");
+        assert_eq!(frame["params"]["limit"], 200);
+    }
+
+    #[test]
+    fn is_silent_reply_detects_sentinels() {
+        // Bare + whitespace-padded + case-insensitive — mirrors
+        // `isSilentReplyText` in `auto-reply/tokens.ts`.
+        assert!(is_silent_reply("NO_REPLY"));
+        assert!(is_silent_reply("  NO_REPLY  "));
+        assert!(is_silent_reply("\nno_reply\n"));
+        assert!(is_silent_reply("HEARTBEAT_OK"));
+        // Envelope form emitted by some agents:
+        // `{"action":"NO_REPLY"}`.
+        assert!(is_silent_reply("{\"action\":\"NO_REPLY\"}"));
+        // Substantive replies that happen to contain the token must
+        // NOT be suppressed — matches issue #19537 in OpenClaw.
+        assert!(!is_silent_reply("Here's a reply.\nNO_REPLY"));
+        assert!(!is_silent_reply("NO_REPLY but here is more"));
+        assert!(!is_silent_reply(""));
+        assert!(!is_silent_reply("Hello"));
+    }
+
+    #[test]
+    fn session_key_parser_extracts_agent_id() {
+        assert_eq!(agent_id_from_session_key("agent:main:main"), Some("main"));
+        assert_eq!(
+            agent_id_from_session_key("agent:memoria:dashboard:foo"),
+            Some("memoria")
+        );
+        // Malformed / legacy keys return None so the caller can fall
+        // back to a default agent instead of routing to a bogus id.
+        assert_eq!(agent_id_from_session_key("main"), None);
+        assert_eq!(agent_id_from_session_key("agent::main"), None);
+        assert_eq!(agent_id_from_session_key("agent:onlyid"), None);
+    }
 
     #[test]
     fn resolve_approval_frame_matches_gateway_schema() {

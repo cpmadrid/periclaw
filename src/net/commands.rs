@@ -30,6 +30,37 @@ pub enum GatewayCommand {
     /// stable UUID (`jobs.json` → `id`), not the human-readable name
     /// — the RPC validates against the id.
     RunCron { job_id: String },
+    /// Operator-requested reconnect — used to short-circuit the long
+    /// scope-upgrade backoff after they approve the pair-request.
+    /// Carries no payload; the session loop interprets it as "stop
+    /// sleeping, try connecting now."
+    Reconnect,
+    /// Send a prompt to a specific agent's main chat session. The
+    /// target `agent_id` maps to `sessionKey: "agent:<id>:main"` in
+    /// `chat.send`. Reply streams back as `session.message` events
+    /// keyed by the same sessionKey, so inbound routing can target
+    /// the right log.
+    ///
+    /// `idempotency_key` is generated UI-side (one per send), not the
+    /// `runId` — the gateway returns the runId in the ack payload but
+    /// we don't need it; `session.message` is keyed by sessionKey.
+    SendChat {
+        agent_id: String,
+        message: String,
+        idempotency_key: String,
+    },
+    /// Fetch an agent's recent `chat.history` on first Chat-tab
+    /// selection per connection. Lazy so switching into an agent we
+    /// already hydrated doesn't re-fire the RPC; the response arrives
+    /// as `WsEvent::ChatHistory { agent_id, .. }`.
+    FetchChatHistory { agent_id: String },
+    /// Fill in a specific agent's operator-chosen persona (name +
+    /// emoji) via `agent.identity.get`. Called by the app once per
+    /// agent after `agents.list` arrives — the list RPC only sees
+    /// identity configured directly on the agent entry, whereas
+    /// `agent.identity.get` also consults `ui.assistant` and the
+    /// workspace identity file (where "Sebastian 🦀" typically lives).
+    FetchAgentIdentity { agent_id: String },
 }
 
 struct Channel {

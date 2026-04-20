@@ -81,7 +81,8 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                         .map(|t| transition_flash(now.saturating_duration_since(*t)))
                         .unwrap_or(0.0);
                     let pos = animated_position(base_pos, status, now);
-                    draw_sprite(frame, pos, agent, flash);
+                    let seconds = clock_phase(now);
+                    draw_sprite(frame, pos, agent, status, flash, seconds);
                     // Bubble anchor stays on the static slot so the
                     // tail doesn't whip around with the bob.
                     sprite_positions.insert(agent.id.clone(), base_pos);
@@ -104,6 +105,8 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
 }
 
 fn draw_room(frame: &mut canvas::Frame, layout: &RoomLayout, room: RoomId) {
+    use crate::scene::sprite::{self, DEFAULT_SCALE};
+
     let rect = layout.room_rect(room);
 
     // Background panel — slightly elevated from the page surface.
@@ -125,6 +128,32 @@ fn draw_room(frame: &mut canvas::Frame, layout: &RoomLayout, room: RoomId) {
         font: iced::Font::MONOSPACE,
         ..Text::default()
     });
+
+    // Decor — one themed furniture piece per room, rendered in the
+    // muted palette so it reads as scenery and agent sprites remain
+    // the focal point. Positioned in the upper-right corner so it
+    // doesn't collide with either the room label (upper-left) or
+    // the sprite slots (lower half).
+    if let Some(decor) = sprite::decor_for_room(room) {
+        let size = sprite::sprite_size_px(decor, DEFAULT_SCALE);
+        // Center of the upper-right quadrant. `+12` / `-12` give the
+        // sprite a small margin from the room edge so it doesn't
+        // touch the border stroke.
+        let decor_center = Point::new(
+            rect.x + rect.width - size.width / 2.0 - 16.0,
+            rect.y + size.height / 2.0 + 20.0,
+        );
+        sprite::draw_sprite_pixels(
+            frame,
+            decor_center,
+            decor,
+            DEFAULT_SCALE,
+            *theme::MUTED,
+            0.75,
+            0.0,
+            0.0,
+        );
+    }
 }
 
 fn draw_bubble(
@@ -144,6 +173,7 @@ fn draw_bubble(
     // share the signature terminal green.
     let accent = match kind {
         crate::scene::BubbleKind::Tool => *theme::STATUS_DEGRADED,
+        crate::scene::BubbleKind::Outgoing => *theme::MUTED,
         _ => *theme::TERMINAL_GREEN,
     };
     let fill = Color {
@@ -176,34 +206,102 @@ fn draw_bubble(
     });
 }
 
-fn draw_sprite(frame: &mut canvas::Frame, pos: Point, agent: &Agent, flash: f32) {
+fn draw_sprite(
+    frame: &mut canvas::Frame,
+    pos: Point,
+    agent: &Agent,
+    status: AgentStatus,
+    flash: f32,
+    seconds: f32,
+) {
+    use crate::scene::sprite::{self, DEFAULT_SCALE};
+
     let color: Color = agent.color();
+    let template = sprite::sprite_for(agent);
+    let size = sprite::sprite_size_px(template, DEFAULT_SCALE);
 
-    // Body: small filled circle (placeholder for pixel sprite).
-    let body = Path::circle(pos, 12.0);
-    frame.fill(&body, color);
+    // Disabled agents render muted — the pixels are still there but
+    // softened, so the operator reads "present but off" instead of
+    // "gone." Error/Unknown stay fully lit so they're eye-catching.
+    let intensity = match status {
+        AgentStatus::Disabled => 0.45,
+        AgentStatus::Unknown => 0.75,
+        _ => 1.0,
+    };
 
-    // Soft glow ring. On a fresh status transition the ring briefly
-    // thickens and brightens (`flash ∈ [0, 1]`) before decaying back.
-    let ring_width = 4.0 + 4.0 * flash;
-    let ring_alpha = 0.35 + 0.55 * flash;
-    frame.stroke(
-        &body,
-        Stroke::default()
-            .with_color(Color {
-                a: ring_alpha,
-                ..color
-            })
-            .with_width(ring_width),
+    // Frame rate per state: running agents walk/flutter faster,
+    // idle ones shift slowly (still alive, not urgent), disabled
+    // freeze entirely.
+    let frame_hz = match (agent.kind, status) {
+        (_, AgentStatus::Disabled) => 0.0,
+        (crate::domain::AgentKind::Cron, AgentStatus::Running) => 4.0,
+        (crate::domain::AgentKind::Main, AgentStatus::Running) => 3.0,
+        (crate::domain::AgentKind::Cron, _) => 1.0,
+        (crate::domain::AgentKind::Main, _) => 0.6,
+        (crate::domain::AgentKind::Channel, _) => 0.0,
+    };
+
+    // Transition-flash halo. A brief, widening rectangle behind the
+    // sprite briefly brightens the slot when status changes —
+    // replaces the old ring-pulse, scaled to the sprite box so the
+    // effect frames the whole figure instead of a circle.
+    if flash > 0.0 {
+        let pad = 6.0 + 4.0 * flash;
+        let halo_origin = Point::new(
+            pos.x - size.width / 2.0 - pad,
+            pos.y - size.height / 2.0 - pad,
+        );
+        let halo_size = Size::new(size.width + pad * 2.0, size.height + pad * 2.0);
+        let halo = Path::rectangle(halo_origin, halo_size);
+        frame.stroke(
+            &halo,
+            Stroke::default()
+                .with_color(Color {
+                    a: 0.25 + 0.55 * flash,
+                    ..color
+                })
+                .with_width(2.0),
+        );
+    }
+
+    sprite::draw_sprite_pixels(
+        frame,
+        pos,
+        template,
+        DEFAULT_SCALE,
+        color,
+        intensity,
+        seconds,
+        frame_hz,
     );
+
+    // Channels get a scrolling scanline on the "screen" region of
+    // the monitor sprite (rows 3..8, cols 3..12 in the template),
+    // but only while connected — a disabled provider's dark screen
+    // sells "off."
+    if matches!(agent.kind, crate::domain::AgentKind::Channel)
+        && !matches!(status, AgentStatus::Disabled)
+    {
+        sprite::draw_scanline(
+            frame,
+            pos,
+            template,
+            DEFAULT_SCALE,
+            3..8,
+            3..12,
+            seconds,
+            color,
+        );
+    }
 
     // Name tag under the sprite. We approximate "centered" by offsetting
     // by half the expected text width (monospace ≈ 6px per char @ 11pt).
-    // Tag uses the static y so it doesn't bounce with the body.
+    // Tag sits below the rendered pixel grid, not the static center.
     let approx_width = (agent.display.len() as f32) * 6.0;
+    let label_y = pos.y + size.height / 2.0 + 6.0;
     frame.fill_text(Text {
         content: agent.display.to_string(),
-        position: Point::new(pos.x - approx_width / 2.0, pos.y + 18.0),
+        position: Point::new(pos.x - approx_width / 2.0, label_y),
         color: *theme::FOREGROUND,
         size: 11.0.into(),
         font: iced::Font::MONOSPACE,
