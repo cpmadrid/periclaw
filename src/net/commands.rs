@@ -61,6 +61,18 @@ pub enum GatewayCommand {
     /// `agent.identity.get` also consults `ui.assistant` and the
     /// workspace identity file (where "Sebastian 🦀" typically lives).
     FetchAgentIdentity { agent_id: String },
+    /// Reset an agent's main session via `sessions.reset`. Destroys
+    /// in-memory chat history and starts a fresh session with the
+    /// same key — the next prompt the operator sends lands in a
+    /// clean context. `session_key` is the fully-qualified key
+    /// (`agent:<id>:main`).
+    ResetSession { session_key: String },
+    /// Fetch `chat.history` for an **arbitrary** session (not the
+    /// default `:main`). Used by the Sessions tab's drill-in detail
+    /// pane. `session_key` is the fully-qualified
+    /// `agent:<agentId>:<sessionId>` form as it appears in
+    /// `SessionInfo.key`.
+    FetchSessionHistory { session_key: String },
 }
 
 struct Channel {

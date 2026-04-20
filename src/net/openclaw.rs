@@ -533,6 +533,13 @@ async fn session(
     // corresponding `ChatHistory` event when the res comes back.
     let mut pending_history: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // Parallel map for arbitrary session-keyed history fetches (the
+    // Sessions tab drill-in). Kept separate from `pending_history`
+    // because the routed events are different — the app stores
+    // agent-main history in `chat_logs` and session-specific history
+    // in `session_transcripts`.
+    let mut pending_session_history: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     // Channel state isn't broadcast as a push event, so we refresh it
     // on a low-cadence heartbeat over the same socket. No cron poll —
@@ -571,6 +578,7 @@ async fn session(
                             &mut seen_message_ids,
                             &mut log_cursor,
                             &mut pending_history,
+                            &mut pending_session_history,
                         ).await?;
                     }
                     Some(Ok(WsMsg::Ping(p))) => {
@@ -598,6 +606,16 @@ async fn session(
                         // `res` handler can tag the emitted event.
                         rpc_id += 1;
                         pending_history.insert(rpc_id.to_string(), agent_id.clone());
+                        send_command_rpc(&mut socket, rpc_id, &cmd).await?;
+                    }
+                    GatewayCommand::FetchSessionHistory { ref session_key } => {
+                        // Parallel path to FetchChatHistory but
+                        // routed to the session-specific transcript
+                        // store — the app matches on the emitted
+                        // event type, not the request id.
+                        rpc_id += 1;
+                        pending_session_history
+                            .insert(rpc_id.to_string(), session_key.clone());
                         send_command_rpc(&mut socket, rpc_id, &cmd).await?;
                     }
                     _ => {
@@ -679,6 +697,21 @@ fn build_command_frame(id: u64, cmd: &GatewayCommand) -> (&'static str, Value) {
         GatewayCommand::FetchAgentIdentity { agent_id } => {
             ("agent.identity.get", json!({ "agentId": agent_id }))
         }
+        GatewayCommand::ResetSession { session_key } => (
+            // Schema: `server-methods/sessions.ts:1332` —
+            // `{ key: sessionKey, reason: "reset" | "new" }`. We
+            // use "reset" so the session entry survives with a
+            // fresh transcript; "new" rotates the identifier.
+            "sessions.reset",
+            json!({ "key": session_key, "reason": "reset" }),
+        ),
+        GatewayCommand::FetchSessionHistory { session_key } => (
+            // Same RPC as the Chat-tab bootstrap path, just with an
+            // arbitrary session key — the gateway happily resolves
+            // any `agent:<id>:<sessionId>` form, not just `:main`.
+            "chat.history",
+            json!({ "sessionKey": session_key, "limit": 200 }),
+        ),
         GatewayCommand::Reconnect => {
             unreachable!("Reconnect is handled in the session select arm, never sent as RPC")
         }
@@ -796,6 +829,7 @@ async fn handle_frame(
     seen_message_ids: &mut std::collections::VecDeque<String>,
     log_cursor: &mut Option<i64>,
     pending_history: &mut std::collections::HashMap<String, String>,
+    pending_session_history: &mut std::collections::HashMap<String, String>,
 ) -> Result<(), SessionError> {
     let frame: Value = serde_json::from_str(txt)?;
 
@@ -873,11 +907,27 @@ async fn handle_frame(
                 return Ok(());
             }
             if let Some(history) = try_chat_history(payload) {
-                // chat.history responses don't echo the sessionKey, so
-                // we recover the agent id from the request-id → agent
-                // map we stamped at send time. If the id is missing
-                // (stale/unknown), fall back to the default agent so
-                // the history still lands somewhere sensible.
+                // chat.history responses don't echo the sessionKey,
+                // so we recover what the call was for from one of
+                // the two pending maps we stamped at send time.
+                // Session-drill-in requests have priority: they're
+                // explicit operator actions with a specific key,
+                // whereas the agent-main path has a sane fallback
+                // ("main") for stale ids.
+                if let Some(session_key) = pending_session_history.remove(res_id) {
+                    tracing::info!(
+                        count = history.len(),
+                        session = %session_key,
+                        "session history drill-in",
+                    );
+                    let _ = out
+                        .send(WsEvent::SessionHistory {
+                            session_key,
+                            messages: history,
+                        })
+                        .await;
+                    return Ok(());
+                }
                 let agent_id = pending_history
                     .remove(res_id)
                     .unwrap_or_else(|| "main".to_string());

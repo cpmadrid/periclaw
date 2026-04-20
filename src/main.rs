@@ -2,9 +2,11 @@ mod app;
 mod config;
 mod device_identity;
 mod domain;
+mod logs;
 mod net;
 mod scene;
 mod ui;
+mod ui_state;
 
 pub use app::Message;
 
@@ -25,10 +27,32 @@ fn main() -> iced::Result {
 
     tracing::info!("starting Mission Control Desktop");
 
-    iced::application(app::App::default, app::App::update, app::App::view)
-        .title("Mission Control")
-        .theme(app::App::theme)
-        .subscription(app::App::subscription)
-        .window_size((1280.0, 800.0))
-        .run()
+    // Pull persisted UI state before the window opens so restored
+    // dimensions apply on first paint, not after a visible resize.
+    let loaded = ui_state::load();
+
+    let window_size = loaded
+        .window
+        .map(|w| iced::Size::new(w.width, w.height))
+        .unwrap_or_else(|| iced::Size::new(1280.0, 800.0));
+    let window_position = loaded
+        .window
+        .and_then(|w| w.position)
+        .map(|(x, y)| iced::window::Position::Specific(iced::Point::new(x, y)))
+        .unwrap_or_default();
+
+    iced::application(
+        move || app::App::new(loaded.clone()),
+        app::App::update,
+        app::App::view,
+    )
+    .title("Mission Control")
+    .theme(app::App::theme)
+    .subscription(app::App::subscription)
+    .window(iced::window::Settings {
+        size: window_size,
+        position: window_position,
+        ..Default::default()
+    })
+    .run()
 }

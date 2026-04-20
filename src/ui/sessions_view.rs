@@ -1,22 +1,43 @@
-//! The "Sessions" nav tab — per-session token usage and freshness.
+//! The "Sessions" nav tab — a two-pane layout:
+//!
+//! - **Left pane**: scrollable list of sessions with per-row token
+//!   summary + freshness badge. The currently-selected session is
+//!   highlighted. Clicking a row fires `Message::SessionSelected`.
+//! - **Right pane**: drill-in detail for the selected session —
+//!   header (model / thinking level), transcript via `chat_bubble`,
+//!   and any token metadata not shown in the list. The detail pane
+//!   is fetched lazily via `chat.history` the first time an entry
+//!   is opened per connection.
 //!
 //! The gateway names sessions as `agent:<agentId>:<sessionId>`. We
 //! strip the `agent:` prefix on display since it's noise (every row
-//! has it). Sort newest-first by `updatedAt`, then by key so tests and
-//! empty-timestamp rows stay deterministic.
+//! has it). Sort newest-first by `updatedAt`, then by key so tests
+//! and empty-timestamp rows stay deterministic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use iced::widget::{Space, column, container, row, scrollable, text};
-use iced::{Alignment, Border, Element, Length, Padding};
+use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::{Alignment, Border, Color, Element, Length, Padding};
 
 use crate::Message;
 use crate::net::rpc::SessionInfo;
-use crate::ui::theme;
+use crate::ui::chat_view::ChatMessage;
+use crate::ui::{chat_bubble, theme};
 
-pub fn view<'a>(sessions: &'a HashMap<String, SessionInfo>) -> Element<'a, Message> {
-    let mut entries: Vec<&SessionInfo> = sessions.values().collect();
+pub struct SessionsViewSnapshot<'a> {
+    pub sessions: &'a HashMap<String, SessionInfo>,
+    pub active_session_key: Option<&'a str>,
+    pub transcripts: &'a HashMap<String, VecDeque<ChatMessage>>,
+    /// Session keys we've asked the gateway about since the last
+    /// connect. Used to tell "empty transcript" (hydrated, actually
+    /// empty) apart from "not yet fetched" (show a loading label).
+    pub hydrated: &'a std::collections::HashSet<String>,
+    pub connected: bool,
+}
+
+pub fn view<'a>(snap: SessionsViewSnapshot<'a>) -> Element<'a, Message> {
+    let mut entries: Vec<&SessionInfo> = snap.sessions.values().collect();
     // Newest first; rows without a timestamp sink to the bottom but
     // stay key-ordered among themselves.
     entries.sort_by(|a, b| {
@@ -25,13 +46,24 @@ pub fn view<'a>(sessions: &'a HashMap<String, SessionInfo>) -> Element<'a, Messa
             .then_with(|| a.key.cmp(&b.key))
     });
 
+    let list = list_pane(&entries, snap.active_session_key);
+    let detail = detail_pane(&entries, &snap);
+
+    row![list, detail]
+        .spacing(0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn list_pane<'a>(entries: &[&'a SessionInfo], active_key: Option<&'a str>) -> Element<'a, Message> {
     let header = column![
-        text("Sessions").size(20).color(*theme::FOREGROUND),
+        text("Sessions").size(16).color(*theme::FOREGROUND),
         text(format!("{} tracked", entries.len()))
-            .size(12)
+            .size(11)
             .color(*theme::MUTED),
     ]
-    .spacing(4);
+    .spacing(2);
 
     let body: Element<'a, Message> = if entries.is_empty() {
         text("no session data yet — waiting for sessions.list")
@@ -40,21 +72,112 @@ pub fn view<'a>(sessions: &'a HashMap<String, SessionInfo>) -> Element<'a, Messa
             .into()
     } else {
         entries
-            .into_iter()
-            .fold(column![].spacing(10), |acc, info| {
-                acc.push(session_card(info))
+            .iter()
+            .fold(column![].spacing(6), |acc, info| {
+                acc.push(session_card(info, Some(info.key.as_str()) == active_key))
             })
             .into()
     };
 
-    let outer = column![header, scrollable(body).height(Length::Fill)]
-        .spacing(14)
-        .padding(Padding::from(24));
+    let outer = column![
+        container(header).padding(Padding::from([14, 16])),
+        scrollable(container(body).padding(Padding::from([0, 12]))).height(Length::Fill),
+    ]
+    .spacing(0);
 
-    outer.into()
+    container(outer)
+        .width(Length::Fixed(320.0))
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some((*theme::SURFACE_1).into()),
+            border: Border {
+                color: *theme::BORDER,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
-fn session_card(info: &SessionInfo) -> Element<'_, Message> {
+fn detail_pane<'a>(
+    entries: &[&'a SessionInfo],
+    snap: &SessionsViewSnapshot<'a>,
+) -> Element<'a, Message> {
+    let Some(key) = snap.active_session_key else {
+        return placeholder("Select a session to see its transcript and usage.");
+    };
+    let info = entries.iter().find(|i| i.key == key);
+
+    let header: Element<'a, Message> = match info {
+        Some(info) => detail_header(info),
+        None => text(format!("session {key} not in list (waiting?)"))
+            .size(12)
+            .color(*theme::MUTED)
+            .into(),
+    };
+
+    let transcript = snap.transcripts.get(key);
+    let hydrated = snap.hydrated.contains(key);
+    let body: Element<'a, Message> = match transcript {
+        Some(messages) if !messages.is_empty() => messages
+            .iter()
+            .fold(column![].spacing(8), |acc, msg| {
+                acc.push(chat_bubble::view(msg))
+            })
+            .into(),
+        Some(_) if hydrated => placeholder_text("session is empty"),
+        _ if !snap.connected => placeholder_text("disconnected — reconnect to load transcript"),
+        _ => placeholder_text("loading transcript…"),
+    };
+
+    let outer = column![
+        container(header)
+            .width(Length::Fill)
+            .padding(Padding::from([16, 24])),
+        container(scrollable(body).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(Padding::from([0, 24])),
+    ]
+    .spacing(0);
+
+    container(outer)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn detail_header<'a>(info: &'a SessionInfo) -> Element<'a, Message> {
+    let title = display_key(&info.key);
+    let subtitle_parts: Vec<String> = [
+        info.model
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        info.thinking_level
+            .as_deref()
+            .filter(|s| !s.is_empty() && *s != "off")
+            .map(|s| format!("thinking: {s}")),
+        Some(tokens_summary(info)),
+        info.updated_at_ms
+            .map(|ms| format!("updated {}", format_time_ago(ms))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    column![
+        text(title.to_string()).size(16).color(*theme::FOREGROUND),
+        text(subtitle_parts.join(" · "))
+            .size(11)
+            .color(*theme::MUTED),
+    ]
+    .spacing(3)
+    .into()
+}
+
+fn session_card(info: &SessionInfo, active: bool) -> Element<'_, Message> {
     let title = display_key(&info.key);
     let model = info
         .model
@@ -63,46 +186,60 @@ fn session_card(info: &SessionInfo) -> Element<'_, Message> {
         .unwrap_or("—");
 
     let header = row![
-        text(title).size(14).color(*theme::FOREGROUND),
-        text(model).size(11).color(*theme::MUTED),
+        text(title).size(13).color(*theme::FOREGROUND),
         Space::new().width(Length::Fill),
         freshness_badge(info.updated_at_ms),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
 
-    let tokens_line = tokens_summary(info);
-    let io_line = io_summary(info);
+    let details = column![
+        text(model).size(11).color(*theme::MUTED),
+        text(tokens_summary(info)).size(11).color(*theme::MUTED),
+    ]
+    .spacing(2);
 
-    let mut details = column![text(tokens_line).size(11).color(*theme::MUTED)].spacing(3);
-    if let Some(line) = io_line {
-        details = details.push(text(line).size(11).color(*theme::MUTED));
-    }
-    if let Some(level) = info
-        .thinking_level
-        .as_deref()
-        .filter(|s| !s.is_empty() && *s != "off")
-    {
-        details = details.push(
-            text(format!("thinking: {level}"))
-                .size(11)
-                .color(*theme::MUTED),
-        );
-    }
+    let card_bg = if active {
+        *theme::SURFACE_3
+    } else {
+        *theme::SURFACE_2
+    };
+    let border_color = if active {
+        *theme::TERMINAL_GREEN
+    } else {
+        *theme::BORDER
+    };
 
-    container(column![header, details].spacing(8))
+    let session_key = info.key.clone();
+    button(column![header, details].spacing(6))
+        .on_press(Message::SessionSelected(session_key))
         .width(Length::Fill)
-        .padding(Padding::from([12, 14]))
-        .style(|_| container::Style {
-            background: Some((*theme::SURFACE_1).into()),
+        .padding(Padding::from([10, 12]))
+        .style(move |_, _| button::Style {
+            background: Some(card_bg.into()),
+            text_color: *theme::FOREGROUND,
             border: Border {
-                color: *theme::BORDER,
+                color: border_color,
                 width: 1.0,
                 radius: 6.0.into(),
             },
             ..Default::default()
         })
         .into()
+}
+
+fn placeholder(msg: &'static str) -> Element<'static, Message> {
+    container(text(msg).size(12).color(*theme::MUTED))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .padding(Padding::from(24))
+        .into()
+}
+
+fn placeholder_text(msg: &'static str) -> Element<'static, Message> {
+    text(msg).size(12).color(*theme::MUTED).into()
 }
 
 fn freshness_badge(updated_at_ms: Option<i64>) -> Element<'static, Message> {
@@ -113,9 +250,9 @@ fn freshness_badge(updated_at_ms: Option<i64>) -> Element<'static, Message> {
     container(text(label).size(10).color(color))
         .padding(Padding::from([2, 6]))
         .style(move |_| container::Style {
-            background: Some(iced::Color { a: 0.10, ..color }.into()),
+            background: Some(Color { a: 0.10, ..color }.into()),
             border: Border {
-                color: iced::Color { a: 0.35, ..color },
+                color: Color { a: 0.35, ..color },
                 width: 1.0,
                 radius: 3.0.into(),
             },
@@ -142,17 +279,6 @@ fn tokens_summary(info: &SessionInfo) -> String {
         (Some(total), None) => format!("tokens: {}", fmt_tokens(total)),
         (None, Some(ctx)) => format!("context: {}", fmt_tokens(ctx)),
         (None, None) => "tokens: —".into(),
-    }
-}
-
-fn io_summary(info: &SessionInfo) -> Option<String> {
-    match (info.input_tokens, info.output_tokens) {
-        (Some(inp), Some(out)) => Some(format!(
-            "io: {} in · {} out",
-            fmt_tokens(inp),
-            fmt_tokens(out)
-        )),
-        _ => None,
     }
 }
 

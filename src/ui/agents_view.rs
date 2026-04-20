@@ -2,15 +2,18 @@
 //! agent a full row of detail the Overview sprite can't surface:
 //!
 //! - crons: schedule-adjacent metadata (`nextRunAtMs`, `lastRunAtMs`,
-//!   duration, last error)
+//!   duration, last error) + "Run now" button
 //! - channels: configured / connected flags + last error string
-//! - main: active model + (soon) session-level metadata
+//! - main: active model + session metadata + "Reset session" button
 //!
-//! Read-only for now — actions (run-cron-now, reset-session) would
-//! land here later.
+//! The Reset button uses a two-click arm pattern: the first click
+//! turns the button red and relabels to "Confirm reset?"; a second
+//! click within the confirmation window dispatches `sessions.reset`.
+//! Auto-disarms if the operator walks away — arm state is pruned on
+//! every Tick.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iced::widget::{Space, button, column, container, row, scrollable, text};
 use iced::{Alignment, Border, Element, Length, Padding};
@@ -31,6 +34,10 @@ pub struct AgentsViewSnapshot<'a> {
     pub channel_details: &'a HashMap<AgentId, Channel>,
     pub active_model: Option<&'a str>,
     pub sessions: &'a HashMap<String, SessionInfo>,
+    /// Main agents whose Reset button is armed — the row renders
+    /// the button in red "Confirm reset?" form instead of the neutral
+    /// "Reset session". Absence means the neutral form is shown.
+    pub pending_resets: &'a HashMap<AgentId, Instant>,
 }
 
 pub fn view<'a>(snap: AgentsViewSnapshot<'a>) -> Element<'a, Message> {
@@ -102,21 +109,22 @@ fn agent_row<'a>(agent: &'a Agent, snap: &AgentsViewSnapshot<'a>) -> Element<'a,
             ..Default::default()
         });
 
-    // Crons with a known UUID get a "Run now" button. Hidden for
-    // crons we haven't seen in a snapshot yet (no UUID on hand to
-    // pass to `cron.run`), and for other agent kinds where the
-    // concept doesn't apply.
-    let run_button: Option<Element<'a, Message>> =
-        if matches!(agent.kind, AgentKind::Cron) && snap.cron_ids.contains_key(&agent.id) {
-            Some(
-                button(text("Run now").size(11))
-                    .padding(Padding::from([4, 10]))
-                    .on_press(Message::RunCron(agent.id.clone()))
-                    .into(),
-            )
-        } else {
-            None
-        };
+    // Per-kind action button — rendered in the header's right gutter
+    // before the status badge. Keeps a single affordance per row so
+    // the card stays scannable.
+    let action_button: Option<Element<'a, Message>> = match agent.kind {
+        AgentKind::Cron if snap.cron_ids.contains_key(&agent.id) => Some(
+            button(text("Run now").size(11))
+                .padding(Padding::from([4, 10]))
+                .on_press(Message::RunCron(agent.id.clone()))
+                .into(),
+        ),
+        AgentKind::Main => Some(reset_session_button(
+            agent.id.clone(),
+            snap.pending_resets.contains_key(&agent.id),
+        )),
+        _ => None,
+    };
 
     let mut header = row![
         dot,
@@ -130,7 +138,7 @@ fn agent_row<'a>(agent: &'a Agent, snap: &AgentsViewSnapshot<'a>) -> Element<'a,
     ]
     .spacing(10)
     .align_y(Alignment::Center);
-    if let Some(btn) = run_button {
+    if let Some(btn) = action_button {
         header = header.push(btn);
     }
     header = header.push(badge);
@@ -222,6 +230,45 @@ fn main_detail_lines<'a>(snap: &AgentsViewSnapshot<'a>) -> Vec<String> {
         lines.push("no session data yet".into());
     }
     lines
+}
+
+/// "Reset session" button with two-click confirmation. The armed
+/// state is driven by the app's `pending_resets` map — flipping
+/// between states is handled by the `ResetMainSession` handler in
+/// `app.rs`, not by local widget state.
+fn reset_session_button(agent_id: AgentId, armed: bool) -> Element<'static, Message> {
+    let (label, fg, bg, border) = if armed {
+        (
+            "Confirm reset?",
+            *theme::STATUS_DOWN,
+            iced::Color {
+                a: 0.18,
+                ..*theme::STATUS_DOWN
+            },
+            *theme::STATUS_DOWN,
+        )
+    } else {
+        (
+            "Reset session",
+            *theme::FOREGROUND,
+            *theme::SURFACE_2,
+            *theme::BORDER,
+        )
+    };
+    button(text(label).size(11).color(fg))
+        .padding(Padding::from([4, 10]))
+        .style(move |_, _| button::Style {
+            background: Some(bg.into()),
+            text_color: fg,
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .on_press(Message::ResetMainSession(agent_id))
+        .into()
 }
 
 fn status_badge(status: AgentStatus) -> (&'static str, iced::Color) {

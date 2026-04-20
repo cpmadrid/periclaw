@@ -7,6 +7,7 @@ use iced::widget::{Canvas, canvas};
 use iced::{Element, Length, Subscription, Task, time};
 
 use crate::domain::{Agent, AgentId, AgentKind, AgentStatus, agent};
+use crate::logs::{self, LogFilters, LogLine, LogSeverity};
 use crate::net::events::{ActivityKind, GatewayUpdate};
 use crate::net::rpc::{AgentInfo, ApprovalEventPayload, Channel, CronState, SessionInfo};
 use crate::net::{WsEvent, events, mock, openclaw};
@@ -16,6 +17,7 @@ use crate::ui::{
     agent_card, agents_view, approvals, chat_input, chat_view, logs_view, sessions_view, sidebar,
     status_bar, theme,
 };
+use crate::ui_state::{self, UiState, WindowState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavItem {
@@ -67,6 +69,41 @@ pub enum Message {
     /// input, and (if not already hydrated this connection) kicks
     /// off `chat.history` for the new agent.
     SelectChatAgent(AgentId),
+    /// Toggle the visibility chip for a given severity in the Logs
+    /// tab. Applies only to the view filter — the underlying buffer
+    /// is unchanged so toggling back is instant.
+    LogsToggleSeverity(LogSeverity),
+    /// Operator edited the Logs-tab search field (every keystroke).
+    /// Empty string means no filter.
+    LogsSearchChanged(String),
+    /// Viewport updated in the Logs scrollable. Used to detect
+    /// whether the operator has scrolled up (which pauses auto-tail
+    /// and reveals the "Jump to latest" pill) or is pinned to the
+    /// bottom (auto-tail resumes).
+    LogsScrolled(iced::widget::scrollable::Viewport),
+    /// "Jump to latest" pill clicked — scroll the Logs scrollable
+    /// back to the bottom and resume auto-tail.
+    LogsJumpToLatest,
+    /// Operator clicked "Reset session" on a Main agent's Agents-tab
+    /// row. First click arms confirmation (the button relabels and
+    /// turns red); a second click within [`RESET_CONFIRM_WINDOW`]
+    /// dispatches `sessions.reset`. Auto-disarms after the window
+    /// elapses without a second click.
+    ResetMainSession(AgentId),
+    /// Operator clicked a session card in the Sessions tab. Updates
+    /// `active_session_key` and kicks off `chat.history` for that
+    /// session if the transcript isn't already cached for this
+    /// connection. Persisted via `UiState` so the selection survives
+    /// a relaunch.
+    SessionSelected(String),
+    /// Window was resized by the OS / compositor. Carries logical
+    /// pixels. Debounced and persisted on the next `Tick` so a drag
+    /// doesn't hammer the state file.
+    WindowResized(f32, f32),
+    /// Window was moved. Some compositors never emit this (Wayland
+    /// hides window coordinates from the client), in which case we
+    /// simply don't restore position on next launch.
+    WindowMoved(f32, f32),
 }
 
 pub struct App {
@@ -113,8 +150,17 @@ pub struct App {
     /// last error). Refreshed by the 30s `channels.status` heartbeat.
     pub channel_details: HashMap<AgentId, Channel>,
     /// Rolling log-tail ring buffer, fed by the periodic `logs.tail`
-    /// RPC. Bounded so memory stays flat on a long-running session.
-    pub log_lines: VecDeque<String>,
+    /// RPC. Each line is classified by severity at ingest so the
+    /// Logs tab can filter / color without re-parsing on redraw.
+    /// Bounded so memory stays flat on a long-running session.
+    pub log_lines: VecDeque<LogLine>,
+    /// Visible-severity chip toggles and the current search text.
+    pub log_filters: LogFilters,
+    /// `true` when the operator is scrolled to the bottom of the
+    /// Logs scrollable — in which case new lines keep auto-scrolling
+    /// into view. Flips to `false` the moment they scroll up,
+    /// surfacing the "Jump to latest" pill; the pill sets it back.
+    pub logs_auto_tail: bool,
     /// Instant at which each agent last changed status. Drives the
     /// ring-pulse animation in `OfficeScene`; entries older than
     /// [`TRANSITION_FLASH`] are pruned each tick.
@@ -147,6 +193,33 @@ pub struct App {
     /// `AgentActivity` and `session.tool`, cleared when the
     /// assistant `session.message` reply lands.
     pub chat_activities: HashMap<AgentId, ChatActivityState>,
+    /// Main agents that have been armed for a session reset via the
+    /// Agents tab's "Reset session" button. Instant records when the
+    /// first click landed; a second click within
+    /// [`RESET_CONFIRM_WINDOW`] actually fires the RPC. Stale entries
+    /// are pruned each `Tick`.
+    pub pending_resets: HashMap<AgentId, Instant>,
+    /// Per-session transcripts for the Sessions tab's drill-in. Keyed
+    /// by the fully-qualified `agent:<id>:<sessionId>` key the gateway
+    /// uses. Separate from `chat_logs` (which keys by agent id and
+    /// holds the default-session transcript rendered in the Chat
+    /// tab) so a drill-in doesn't clobber the Chat-tab view.
+    pub session_transcripts: HashMap<String, VecDeque<ChatMessage>>,
+    /// Session keys whose transcript has been hydrated this
+    /// connection. Cleared on disconnect — the next reconnect
+    /// re-pulls as the operator reopens each one.
+    pub session_history_fetched: HashSet<String>,
+    /// Currently-selected session in the Sessions tab's drill-in
+    /// view. `None` means no session is selected and the detail
+    /// pane shows its placeholder.
+    pub active_session_key: Option<String>,
+    /// Pending window-state change awaiting a debounced flush. Reset
+    /// each time the window moves or resizes; flushed to disk on the
+    /// next `Tick` that lands at least [`WINDOW_SAVE_DEBOUNCE`] after
+    /// the most recent change — prevents a drag-to-resize from
+    /// writing the state file dozens of times per second.
+    pending_window: Option<WindowState>,
+    pending_window_since: Option<Instant>,
 }
 
 /// What the currently-selected agent is doing right now, as far as
@@ -191,10 +264,45 @@ pub const CHAT_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(45);
 /// without paging.
 const CHAT_LOG_MAX: usize = 500;
 
+/// How long to wait after the last window move/resize before
+/// persisting the new dimensions. 250 ms is long enough to collapse
+/// an entire interactive drag into one write, short enough that a
+/// quick resize + quit still lands on disk.
+const WINDOW_SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Two-click confirmation window for destructive ops like Reset
+/// session. 4 seconds is enough that an operator whose mouse hovered
+/// elsewhere has time to come back, short enough that a stale arm
+/// doesn't quietly disarm nothing and then trigger on the next click.
+const RESET_CONFIRM_WINDOW: Duration = Duration::from_secs(4);
+
 impl Default for App {
     fn default() -> Self {
+        Self::new(UiState::default())
+    }
+}
+
+impl App {
+    /// Build a fresh App, applying any persisted UI state where the
+    /// value is still meaningful (tab / selected agent). The seed
+    /// roster is unconditional — the persisted selected agent may
+    /// reference a dynamic id that hasn't been re-announced yet, but
+    /// when `agents.list` arrives the selection simply stays put and
+    /// `chat.history` fires on first open as usual.
+    pub fn new(state: UiState) -> Self {
+        let nav = state
+            .tab
+            .as_deref()
+            .and_then(ui_state::nav_from_str)
+            .unwrap_or(NavItem::Overview);
+        let selected_chat_agent = state
+            .selected_agent
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(AgentId::new)
+            .unwrap_or_else(|| AgentId::new("main"));
         Self {
-            nav: NavItem::Overview,
+            nav,
             roster: agent::seed_roster(),
             statuses: HashMap::new(),
             bubbles: Vec::new(),
@@ -210,23 +318,42 @@ impl Default for App {
             cron_ids: HashMap::new(),
             channel_details: HashMap::new(),
             log_lines: VecDeque::with_capacity(2048),
+            log_filters: LogFilters::default(),
+            logs_auto_tail: true,
             transition_moments: HashMap::new(),
             scene_cache: canvas::Cache::default(),
             chat_input: String::new(),
             chat_logs: HashMap::new(),
             chat_agents: Vec::new(),
-            selected_chat_agent: AgentId::new("main"),
+            selected_chat_agent,
             history_fetched: HashSet::new(),
             chat_activities: HashMap::new(),
+            pending_resets: HashMap::new(),
+            session_transcripts: HashMap::new(),
+            session_history_fetched: HashSet::new(),
+            active_session_key: state.active_session_key.filter(|s| !s.is_empty()),
+            pending_window: state.window,
+            pending_window_since: None,
         }
     }
-}
 
-impl App {
+    /// Snapshot the bits of the app we persist across launches.
+    fn ui_state_snapshot(&self) -> UiState {
+        UiState {
+            tab: Some(ui_state::nav_to_str(self.nav).to_string()),
+            selected_agent: Some(self.selected_chat_agent.as_str().to_string()),
+            active_session_key: self.active_session_key.clone(),
+            window: self.pending_window,
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::NavClicked(item) => {
-                self.nav = item;
+                if self.nav != item {
+                    self.nav = item;
+                    ui_state::save(&self.ui_state_snapshot());
+                }
                 Task::none()
             }
             Message::Ws(event) => {
@@ -342,6 +469,7 @@ impl App {
                         tracing::warn!(error = %e, "could not dispatch FetchChatHistory");
                     }
                 }
+                ui_state::save(&self.ui_state_snapshot());
                 Task::none()
             }
             Message::RequestReconnect => {
@@ -378,12 +506,123 @@ impl App {
                 }
                 Task::none()
             }
+            Message::SessionSelected(session_key) => {
+                let changed = self.active_session_key.as_deref() != Some(session_key.as_str());
+                if changed {
+                    tracing::info!(key = %session_key, "UI: session drill-in");
+                    self.active_session_key = Some(session_key.clone());
+                    ui_state::save(&self.ui_state_snapshot());
+                }
+                // Lazy hydrate: only fetch this session's transcript
+                // the first time it's opened per connection.
+                if !self.session_history_fetched.contains(&session_key) {
+                    self.session_history_fetched.insert(session_key.clone());
+                    if let Err(e) = crate::net::commands::sender().send(
+                        crate::net::commands::GatewayCommand::FetchSessionHistory { session_key },
+                    ) {
+                        tracing::warn!(error = %e, "could not dispatch FetchSessionHistory");
+                    }
+                }
+                Task::none()
+            }
+            Message::ResetMainSession(agent_id) => {
+                let now = Instant::now();
+                let armed_recently = self
+                    .pending_resets
+                    .get(&agent_id)
+                    .is_some_and(|t| now.saturating_duration_since(*t) < RESET_CONFIRM_WINDOW);
+                if armed_recently {
+                    self.pending_resets.remove(&agent_id);
+                    let session_key = format!("agent:{}:main", agent_id.as_str());
+                    tracing::info!(
+                        id = %agent_id.as_str(),
+                        key = %session_key,
+                        "UI: sessions.reset (confirmed)",
+                    );
+                    if let Err(e) = crate::net::commands::sender()
+                        .send(crate::net::commands::GatewayCommand::ResetSession { session_key })
+                    {
+                        tracing::warn!(error = %e, "could not dispatch ResetSession command");
+                    }
+                } else {
+                    tracing::debug!(
+                        id = %agent_id.as_str(),
+                        "UI: reset armed — awaiting confirmation",
+                    );
+                    self.pending_resets.insert(agent_id, now);
+                }
+                Task::none()
+            }
+            Message::LogsToggleSeverity(sev) => {
+                self.log_filters.toggle(sev);
+                Task::none()
+            }
+            Message::LogsSearchChanged(value) => {
+                self.log_filters.search = value;
+                Task::none()
+            }
+            Message::LogsScrolled(viewport) => {
+                // Pin = within 2% of the bottom. A hard == 1.0 check
+                // is too strict — float rounding during resize or
+                // content-growth can produce 0.9998 even when the
+                // user hasn't scrolled away. 0.98 gives the view
+                // headroom without making a small upward scroll go
+                // unnoticed.
+                let y = viewport.relative_offset().y;
+                self.logs_auto_tail = !y.is_finite() || y >= 0.98;
+                Task::none()
+            }
+            Message::LogsJumpToLatest => {
+                self.logs_auto_tail = true;
+                iced::widget::operation::snap_to_end(logs_view::scroll_id())
+            }
+            Message::WindowResized(width, height) => {
+                let window = self.pending_window.unwrap_or(WindowState {
+                    width,
+                    height,
+                    position: None,
+                });
+                self.pending_window = Some(WindowState {
+                    width,
+                    height,
+                    position: window.position,
+                });
+                self.pending_window_since = Some(Instant::now());
+                Task::none()
+            }
+            Message::WindowMoved(x, y) => {
+                let window = self.pending_window.unwrap_or(WindowState {
+                    // No size yet — use the launch defaults so we at
+                    // least write something sensible. The first Resize
+                    // event to follow will overwrite these.
+                    width: 1280.0,
+                    height: 800.0,
+                    position: None,
+                });
+                self.pending_window = Some(WindowState {
+                    width: window.width,
+                    height: window.height,
+                    position: Some((x, y)),
+                });
+                self.pending_window_since = Some(Instant::now());
+                Task::none()
+            }
             Message::Tick => {
                 let now = Instant::now();
                 let before = self.bubbles.len();
                 self.bubbles.retain(|b| !b.expired(now));
                 self.transition_moments
                     .retain(|_, t| now.saturating_duration_since(*t) < TRANSITION_FLASH);
+                // Debounced window-state flush. Only write once the
+                // operator has stopped dragging / resizing for the
+                // debounce interval — otherwise a resize produces
+                // dozens of writes per second.
+                if let Some(since) = self.pending_window_since
+                    && now.saturating_duration_since(since) >= WINDOW_SAVE_DEBOUNCE
+                {
+                    self.pending_window_since = None;
+                    ui_state::save(&self.ui_state_snapshot());
+                }
                 // Drop activity rows that have been stale for too
                 // long — prevents a "thinking…" indicator from
                 // getting stuck when the server fails to close out
@@ -391,6 +630,11 @@ impl App {
                 self.chat_activities.retain(|_, state| {
                     now.saturating_duration_since(state.since) < CHAT_ACTIVITY_TIMEOUT
                 });
+                // Disarm stale reset confirmations so the button
+                // doesn't sit in red indefinitely after an operator
+                // wandered off.
+                self.pending_resets
+                    .retain(|_, t| now.saturating_duration_since(*t) < RESET_CONFIRM_WINDOW);
                 // Redraw every tick while anything is animating. The
                 // office is considered "animating" if there's any
                 // bubble or if a sprite is in a state that changes
@@ -437,6 +681,10 @@ impl App {
                 // the operator touches each agent. Logs themselves
                 // are kept so the visible transcript survives a blip.
                 self.history_fetched.clear();
+                // Session drill-in transcripts follow the same
+                // rule — keep them rendered across a blip, but
+                // re-pull on reopen after reconnect.
+                self.session_history_fetched.clear();
                 // Clear pending-response indicators — any run that
                 // was in progress gets re-signaled on reconnect if
                 // it's still going; a ghost "thinking…" across a
@@ -652,6 +900,29 @@ impl App {
                 self.last_poll = Some(Instant::now());
                 self.chat_activities.remove(&agent_id);
             }
+            WsEvent::SessionHistory {
+                session_key,
+                messages,
+            } => {
+                tracing::info!(
+                    key = %session_key,
+                    count = messages.len(),
+                    "session history drill-in applied",
+                );
+                // Replace rather than append — the server is the
+                // authority on session history.
+                let log = self
+                    .session_transcripts
+                    .entry(session_key)
+                    .or_insert_with(|| VecDeque::with_capacity(64));
+                log.clear();
+                for m in messages {
+                    if log.len() >= CHAT_LOG_MAX {
+                        log.pop_front();
+                    }
+                    log.push_back(m);
+                }
+            }
             WsEvent::ChatHistory { agent_id, messages } => {
                 tracing::info!(
                     agent = %agent_id.as_str(),
@@ -778,10 +1049,7 @@ impl App {
                     self.log_lines.clear();
                 }
                 for line in tail.lines {
-                    if self.log_lines.len() >= 2000 {
-                        self.log_lines.pop_front();
-                    }
-                    self.log_lines.push_back(line);
+                    logs::push_line(&mut self.log_lines, LogLine::classify(line));
                 }
             }
             WsEvent::ScopeUpgradePending(request_id) => {
@@ -896,6 +1164,7 @@ impl App {
                 channel_details: &self.channel_details,
                 active_model: self.active_model.as_deref(),
                 sessions: &self.sessions,
+                pending_resets: &self.pending_resets,
             }),
             NavItem::Chat => chat_view::view(
                 &self.chat_agents,
@@ -905,8 +1174,18 @@ impl App {
                 &self.chat_input,
                 self.connected,
             ),
-            NavItem::Sessions => sessions_view::view(&self.sessions),
-            NavItem::Logs => logs_view::view(self.log_lines.iter()),
+            NavItem::Sessions => sessions_view::view(sessions_view::SessionsViewSnapshot {
+                sessions: &self.sessions,
+                active_session_key: self.active_session_key.as_deref(),
+                transcripts: &self.session_transcripts,
+                hydrated: &self.session_history_fetched,
+                connected: self.connected,
+            }),
+            NavItem::Logs => logs_view::view(
+                self.log_lines.iter(),
+                &self.log_filters,
+                self.logs_auto_tail,
+            ),
             NavItem::Settings => coming_soon("Settings"),
         };
 
@@ -995,6 +1274,11 @@ impl App {
             Subscription::run(openclaw::connect).map(Message::Ws)
         };
 
+        // Window move/resize events route into the debounced save
+        // path. `listen_with` wants a plain `fn` — the filter body
+        // stays outside the closure so it can stay that shape.
+        let window_events = iced::event::listen_with(window_event_filter);
+
         // Three-tier tick so the office feels alive without burning
         // CPU on a quiet scene:
         // - 33 ms while anything is actively moving (bob, flash,
@@ -1014,7 +1298,7 @@ impl App {
         };
         let tick = time::every(tick_interval).map(|_| Message::Tick);
 
-        Subscription::batch([ws, tick])
+        Subscription::batch([ws, tick, window_events])
     }
 
     pub fn theme(&self) -> iced::Theme {
@@ -1116,6 +1400,26 @@ fn clean_bubble_text(raw: &str, max: usize) -> String {
     let mut out: String = trimmed.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// Narrow the global Iced event stream to just the two window-level
+/// changes we care about for state persistence. Must be a bare `fn`
+/// (no captures) because `iced::event::listen_with` takes a function
+/// pointer.
+fn window_event_filter(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Window(iced::window::Event::Resized(size)) => {
+            Some(Message::WindowResized(size.width, size.height))
+        }
+        iced::Event::Window(iced::window::Event::Moved(point)) => {
+            Some(Message::WindowMoved(point.x, point.y))
+        }
+        _ => None,
+    }
 }
 
 fn coming_soon(title: &'static str) -> Element<'static, Message> {

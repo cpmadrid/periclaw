@@ -50,6 +50,14 @@ pub enum WsEvent {
         agent_id: AgentId,
         messages: Vec<crate::ui::chat_view::ChatMessage>,
     },
+    /// Transcript for a **specific** session (not the agent's main
+    /// session), returned when the Sessions tab's drill-in pane
+    /// requests it. Keyed by the full `agent:<id>:<sessionId>` form
+    /// so the detail view can look it up without further parsing.
+    SessionHistory {
+        session_key: String,
+        messages: Vec<crate::ui::chat_view::ChatMessage>,
+    },
     /// Tool-invocation text (e.g. `⚙ exec`) — spawns a distinctly
     /// styled bubble so the operator can tell tool calls apart from
     /// conversational messages.

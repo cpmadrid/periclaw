@@ -14,14 +14,14 @@
 use std::collections::VecDeque;
 use std::time::SystemTime;
 
-use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding};
 
 use crate::Message;
 use crate::app::{ChatActivity, ChatActivityState};
 use crate::domain::AgentId;
 use crate::net::rpc::AgentInfo;
-use crate::ui::{chat_input, theme};
+use crate::ui::{chat_bubble, chat_input, theme};
 
 /// In-memory representation of a chat-log entry. Role drives
 /// bubble styling; text is the normalized single-string body
@@ -192,7 +192,9 @@ fn right_pane<'a>(
     let body: Element<'a, Message> = match log {
         Some(messages) if !messages.is_empty() => messages
             .iter()
-            .fold(column![].spacing(8), |acc, msg| acc.push(message_row(msg)))
+            .fold(column![].spacing(8), |acc, msg| {
+                acc.push(chat_bubble::view(msg))
+            })
             .into(),
         _ => container(
             text("No messages yet. Type below to start.")
@@ -269,40 +271,5 @@ fn activity_indicator<'a>(
     )
     .width(Length::Fill)
     .padding(Padding::from([6, 24]))
-    .into()
-}
-
-fn message_row(msg: &ChatMessage) -> Element<'_, Message> {
-    let (label, accent) = match msg.role {
-        ChatRole::User => ("you", *theme::MUTED),
-        ChatRole::Assistant => ("agent", *theme::TERMINAL_GREEN),
-        ChatRole::Other => ("system", *theme::STATUS_DEGRADED),
-    };
-
-    let bubble = container(
-        column![
-            text(label).size(10).color(accent),
-            text(msg.text.as_str()).size(13).color(*theme::FOREGROUND),
-        ]
-        .spacing(3),
-    )
-    .padding(Padding::from([8, 12]))
-    .max_width(720.0)
-    .style(move |_| container::Style {
-        background: Some((*theme::SURFACE_1).into()),
-        border: Border {
-            color: Color { a: 0.35, ..accent },
-            width: 1.0,
-            radius: 6.0.into(),
-        },
-        ..Default::default()
-    });
-
-    match msg.role {
-        ChatRole::User => row![Space::new().width(Length::Fill), bubble],
-        _ => row![bubble, Space::new().width(Length::Fill)],
-    }
-    .align_y(Alignment::Start)
-    .width(Length::Fill)
     .into()
 }

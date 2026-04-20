@@ -1,6 +1,7 @@
 pub mod agent_card;
 pub mod agents_view;
 pub mod approvals;
+pub mod chat_bubble;
 pub mod chat_input;
 pub mod chat_view;
 pub mod logs_view;
