@@ -35,6 +35,12 @@ keyring = { version = "3", features = ["apple-native", "linux-native-sync-persis
 directories = "6"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
+# Native OS notifications for approval requests, cron failures, and
+# gateway update availability. `notify-rust` is a thin cross-platform
+# shim — macOS talks to UserNotifications, Linux talks to zbus,
+# Windows talks to WinRT. Default features pull `z` (zbus) which is
+# what we want for the Linux wall-display path.
+notify-rust = "4"
 
 [profile.release]
 lto = "thin"

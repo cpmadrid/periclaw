@@ -13,6 +13,7 @@ use crate::net::rpc::{
     AgentInfo, ApprovalEventPayload, Channel, CronState, SessionInfo, SessionUsagePoint,
 };
 use crate::net::{WsEvent, events, mock, openclaw};
+use crate::notifications::Notifier;
 use crate::palette::{self, PaletteAction, PaletteContext, PaletteEntry};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
 use crate::ui::chat_view::ChatMessage;
@@ -238,6 +239,12 @@ pub struct App {
     /// view. `None` means no session is selected and the detail
     /// pane shows its placeholder.
     pub active_session_key: Option<String>,
+    /// Native-OS notification dispatcher. Stays in `App` state so
+    /// its dedup sets (seen approvals, notified cron errors) persist
+    /// across WsEvent arrivals, which otherwise would refire on
+    /// every heartbeat. Cleared on disconnect so reconnect-time
+    /// bootstrap can re-surface anything still unresolved.
+    pub notifier: Notifier,
     /// Palette overlay visibility. When true, the main view is
     /// covered by a stack-layered palette widget that captures all
     /// keyboard nav.
@@ -379,6 +386,7 @@ impl App {
             session_history_fetched: HashSet::new(),
             active_session_key: state.active_session_key.filter(|s| !s.is_empty()),
             session_usage: HashMap::new(),
+            notifier: Notifier::new(),
             palette_open: false,
             palette_input: String::new(),
             palette_selected: 0,
@@ -872,6 +880,10 @@ impl App {
                 // rule — keep them rendered across a blip, but
                 // re-pull on reopen after reconnect.
                 self.session_history_fetched.clear();
+                // Let unresolved approvals / cron errors re-surface
+                // on the next connect so the operator isn't left
+                // staring at a stale snapshot without a fresh ping.
+                self.notifier.reset_on_disconnect();
                 // Clear pending-response indicators — any run that
                 // was in progress gets re-signaled on reconnect if
                 // it's still going; a ghost "thinking…" across a
@@ -888,6 +900,10 @@ impl App {
                     if let Some(uuid) = cron.id.as_deref() {
                         self.cron_ids.insert(id.clone(), uuid.to_string());
                     }
+                    // Notify if this cron is reporting an error —
+                    // Notifier's dedup keeps repeated heartbeats
+                    // quiet.
+                    self.notifier.cron_state_changed(&id, &cron.state);
                     let status = events::cron_status(cron);
                     self.apply_status_update(id, status);
                 }
@@ -904,6 +920,13 @@ impl App {
                     self.cron_details.entry(id.clone()).or_default(),
                     &cron.state,
                 );
+                // Notify from the merged state (not the delta alone)
+                // so a `finished` event with no `last_error` set
+                // doesn't accidentally clear dedup when we still
+                // have the error text from the snapshot.
+                if let Some(merged) = self.cron_details.get(&id) {
+                    self.notifier.cron_state_changed(&id, merged);
+                }
                 let status = events::cron_status(&cron);
                 self.apply_status_update(id, status);
             }
@@ -1230,6 +1253,7 @@ impl App {
             }
             WsEvent::ApprovalRequested(payload) => {
                 self.last_poll = Some(Instant::now());
+                self.notifier.approval_requested(&payload);
                 let key = payload.id.clone().unwrap_or_else(|| {
                     // No id — best-effort key from tool+summary so
                     // resolved(null-id) still matches something.
@@ -1242,6 +1266,9 @@ impl App {
                 self.pending_approvals.insert(key, payload);
             }
             WsEvent::UpdateAvailable(update) => {
+                if let Some(ref u) = update {
+                    self.notifier.update_available(u);
+                }
                 self.gateway_update = update;
             }
             WsEvent::LogTail(tail) => {
@@ -1266,6 +1293,7 @@ impl App {
             }
             WsEvent::ApprovalResolved { id } => {
                 self.last_poll = Some(Instant::now());
+                self.notifier.approval_resolved(id.as_deref());
                 if let Some(id) = id.as_deref() {
                     self.pending_approvals.remove(id);
                 } else {

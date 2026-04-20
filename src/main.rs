@@ -4,6 +4,7 @@ mod device_identity;
 mod domain;
 mod logs;
 mod net;
+mod notifications;
 mod palette;
 mod scene;
 mod ui;
