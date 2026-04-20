@@ -58,6 +58,13 @@ pub enum WsEvent {
         session_key: String,
         messages: Vec<crate::ui::chat_view::ChatMessage>,
     },
+    /// Token-usage time series for a session — drives the
+    /// cumulative-tokens sparkline on the Sessions drill-in.
+    /// Downsampled to ≤200 points gateway-side.
+    SessionUsageTimeseries {
+        session_key: String,
+        points: Vec<crate::net::rpc::SessionUsagePoint>,
+    },
     /// Tool-invocation text (e.g. `⚙ exec`) — spawns a distinctly
     /// styled bubble so the operator can tell tool calls apart from
     /// conversational messages.

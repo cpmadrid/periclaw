@@ -209,6 +209,45 @@ pub struct SessionInfo {
     pub agent_id: Option<String>,
 }
 
+/// A single point in a session's token-usage time series. Shape from
+/// `openclaw/src/shared/session-usage-timeseries-types.ts`. We only
+/// deserialize the fields the sparkline actually consumes —
+/// `cumulative_tokens` (the primary y-axis value) and `timestamp`
+/// (x-axis). Input / output / cache splits are preserved so a future
+/// stacked view can grow into them without another RPC round-trip.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionUsagePoint {
+    #[serde(default)]
+    pub timestamp: i64,
+    #[serde(default)]
+    pub input: i64,
+    #[serde(default)]
+    pub output: i64,
+    #[serde(default, rename = "cacheRead")]
+    pub cache_read: i64,
+    #[serde(default, rename = "cacheWrite")]
+    pub cache_write: i64,
+    #[serde(default, rename = "totalTokens")]
+    pub total_tokens: i64,
+    #[serde(default, rename = "cumulativeTokens")]
+    pub cumulative_tokens: i64,
+    #[serde(default)]
+    pub cost: f64,
+    #[serde(default, rename = "cumulativeCost")]
+    pub cumulative_cost: f64,
+}
+
+/// Response payload for `sessions.usage.timeseries`. Already
+/// downsampled on the gateway to ≤200 points; no client-side
+/// bucketing required. We only care about the `points` vec — the
+/// gateway also echoes `sessionId`, but the client correlates by
+/// request id, so echoing it back would just duplicate state.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionUsageTimeseries {
+    #[serde(default)]
+    pub points: Vec<SessionUsagePoint>,
+}
+
 /// Response of the `logs.tail` RPC
 /// (`openclaw/src/logging/log-tail.ts:13`). Returns a slice of the
 /// rolling log file starting at `cursor`; the caller stores the new

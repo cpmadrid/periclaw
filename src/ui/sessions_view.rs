@@ -17,12 +17,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::widget::{Space, button, canvas, column, container, row, scrollable, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding};
 
 use crate::Message;
-use crate::net::rpc::SessionInfo;
+use crate::net::rpc::{SessionInfo, SessionUsagePoint};
 use crate::ui::chat_view::ChatMessage;
+use crate::ui::sparkline::{self, TokenSparkline};
 use crate::ui::{chat_bubble, theme};
 
 pub struct SessionsViewSnapshot<'a> {
@@ -33,6 +34,10 @@ pub struct SessionsViewSnapshot<'a> {
     /// connect. Used to tell "empty transcript" (hydrated, actually
     /// empty) apart from "not yet fetched" (show a loading label).
     pub hydrated: &'a std::collections::HashSet<String>,
+    /// Per-session usage timeseries. Absence = "not fetched yet";
+    /// empty Vec = "fetched, session has no recorded points".
+    pub usage: &'a HashMap<String, Vec<SessionUsagePoint>>,
+    pub sparkline_cache: &'a iced::widget::canvas::Cache,
     pub connected: bool,
 }
 
@@ -131,14 +136,31 @@ fn detail_pane<'a>(
         _ => placeholder_text("loading transcript…"),
     };
 
+    // Sparkline sits between header and transcript — always
+    // occupies the same vertical slot so the transcript doesn't
+    // reflow when data arrives; renders a placeholder when the
+    // series isn't known yet.
+    let spark_points = snap.usage.get(key).map(Vec::as_slice).unwrap_or(&[]);
+    let context_budget = info.and_then(|i| i.context_tokens);
+    let sparkline_widget = canvas(TokenSparkline {
+        points: spark_points,
+        context_budget,
+        cache: snap.sparkline_cache,
+    })
+    .width(Length::Fill)
+    .height(Length::Fixed(sparkline::MIN_HEIGHT));
+
     let outer = column![
         container(header)
             .width(Length::Fill)
             .padding(Padding::from([16, 24])),
+        container(sparkline_widget)
+            .width(Length::Fill)
+            .padding(Padding::from([0, 24])),
         container(scrollable(body).height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(Padding::from([0, 24])),
+            .padding(Padding::from([8, 24])),
     ]
     .spacing(0);
 

@@ -540,6 +540,12 @@ async fn session(
     // in `session_transcripts`.
     let mut pending_session_history: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // Sessions drill-in token-usage sparkline. `sessions.usage.
+    // timeseries` responses carry `sessionId` but not the full
+    // session key we asked for, so we remember the key at send time
+    // to route the event back to the right UI row.
+    let mut pending_session_usage: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     // Channel state isn't broadcast as a push event, so we refresh it
     // on a low-cadence heartbeat over the same socket. No cron poll —
@@ -579,6 +585,7 @@ async fn session(
                             &mut log_cursor,
                             &mut pending_history,
                             &mut pending_session_history,
+                            &mut pending_session_usage,
                         ).await?;
                     }
                     Some(Ok(WsMsg::Ping(p))) => {
@@ -615,6 +622,12 @@ async fn session(
                         // event type, not the request id.
                         rpc_id += 1;
                         pending_session_history
+                            .insert(rpc_id.to_string(), session_key.clone());
+                        send_command_rpc(&mut socket, rpc_id, &cmd).await?;
+                    }
+                    GatewayCommand::FetchSessionUsage { ref session_key } => {
+                        rpc_id += 1;
+                        pending_session_usage
                             .insert(rpc_id.to_string(), session_key.clone());
                         send_command_rpc(&mut socket, rpc_id, &cmd).await?;
                     }
@@ -711,6 +724,14 @@ fn build_command_frame(id: u64, cmd: &GatewayCommand) -> (&'static str, Value) {
             // any `agent:<id>:<sessionId>` form, not just `:main`.
             "chat.history",
             json!({ "sessionKey": session_key, "limit": 200 }),
+        ),
+        GatewayCommand::FetchSessionUsage { session_key } => (
+            // Schema: `openclaw/src/gateway/server-methods/usage.ts:829`
+            // — requires `key` (session key, not an agent id). The
+            // gateway downsamples to ≤200 points and returns
+            // `{ sessionId, points: [...] }`.
+            "sessions.usage.timeseries",
+            json!({ "key": session_key }),
         ),
         GatewayCommand::Reconnect => {
             unreachable!("Reconnect is handled in the session select arm, never sent as RPC")
@@ -822,6 +843,12 @@ pub(crate) fn agent_id_from_session_key(key: &str) -> Option<&str> {
     (!id.is_empty()).then_some(id)
 }
 
+// Session-loop frame dispatcher. The argument list grew organically
+// as new RPC flows (chat.history drill-in, usage timeseries) needed
+// their own correlation state; grouping into a struct would add a
+// layer between the session loop and its scratch state for little
+// real benefit.
+#[allow(clippy::too_many_arguments)]
 async fn handle_frame(
     txt: &str,
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
@@ -830,6 +857,7 @@ async fn handle_frame(
     log_cursor: &mut Option<i64>,
     pending_history: &mut std::collections::HashMap<String, String>,
     pending_session_history: &mut std::collections::HashMap<String, String>,
+    pending_session_usage: &mut std::collections::HashMap<String, String>,
 ) -> Result<(), SessionError> {
     let frame: Value = serde_json::from_str(txt)?;
 
@@ -940,6 +968,27 @@ async fn handle_frame(
                     .send(WsEvent::ChatHistory {
                         agent_id: crate::domain::AgentId::new(agent_id),
                         messages: history,
+                    })
+                    .await;
+                return Ok(());
+            }
+            // `sessions.usage.timeseries` response — matched by
+            // request-id before falling through to shape-based
+            // detectors, because the payload's only distinctive
+            // field (`points`) could collide with any future array-
+            // shaped RPC.
+            if let Some(session_key) = pending_session_usage.remove(res_id)
+                && let Some(timeseries) = try_session_usage_timeseries(payload)
+            {
+                tracing::info!(
+                    count = timeseries.points.len(),
+                    session = %session_key,
+                    "session usage timeseries",
+                );
+                let _ = out
+                    .send(WsEvent::SessionUsageTimeseries {
+                        session_key,
+                        points: timeseries.points,
                     })
                     .await;
                 return Ok(());
@@ -1494,6 +1543,16 @@ fn flatten_message_content(message: &Value) -> Option<String> {
     }
     if let Some(s) = message.get("text").and_then(Value::as_str) {
         return Some(s.to_string());
+    }
+    None
+}
+
+fn try_session_usage_timeseries(v: &Value) -> Option<crate::net::rpc::SessionUsageTimeseries> {
+    // Payload shape: `{ sessionId, points: [...] }`. Accept either
+    // the object itself or an envelope that nests it — future-proof
+    // against an envelope change that'd otherwise drop the chart.
+    if v.get("points").is_some() {
+        return serde_json::from_value(v.clone()).ok();
     }
     None
 }

@@ -9,7 +9,9 @@ use iced::{Element, Length, Subscription, Task, time};
 use crate::domain::{Agent, AgentId, AgentKind, AgentStatus, agent};
 use crate::logs::{self, LogFilters, LogLine, LogSeverity};
 use crate::net::events::{ActivityKind, GatewayUpdate};
-use crate::net::rpc::{AgentInfo, ApprovalEventPayload, Channel, CronState, SessionInfo};
+use crate::net::rpc::{
+    AgentInfo, ApprovalEventPayload, Channel, CronState, SessionInfo, SessionUsagePoint,
+};
 use crate::net::{WsEvent, events, mock, openclaw};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
 use crate::ui::chat_view::ChatMessage;
@@ -166,6 +168,10 @@ pub struct App {
     /// [`TRANSITION_FLASH`] are pruned each tick.
     pub transition_moments: HashMap<AgentId, Instant>,
     pub scene_cache: canvas::Cache,
+    /// Cache for the Sessions tab's token-usage sparkline. Cleared
+    /// whenever the active session's points change so the canvas
+    /// re-renders only when there's something new to draw.
+    pub sparkline_cache: canvas::Cache,
     /// Contents of the chat input field (shared across Overview and
     /// Chat tabs). Cleared on agent switch so a half-typed message
     /// for Sebastian doesn't carry over into a reply to memoria.
@@ -213,6 +219,11 @@ pub struct App {
     /// view. `None` means no session is selected and the detail
     /// pane shows its placeholder.
     pub active_session_key: Option<String>,
+    /// Token-usage time series per session, keyed by full session
+    /// key. Drives the sparkline in the detail pane. Absent ≠ empty:
+    /// a missing entry means "not fetched yet"; an empty Vec means
+    /// "fetched, no data points recorded."
+    pub session_usage: HashMap<String, Vec<SessionUsagePoint>>,
     /// Pending window-state change awaiting a debounced flush. Reset
     /// each time the window moves or resizes; flushed to disk on the
     /// next `Tick` that lands at least [`WINDOW_SAVE_DEBOUNCE`] after
@@ -322,6 +333,7 @@ impl App {
             logs_auto_tail: true,
             transition_moments: HashMap::new(),
             scene_cache: canvas::Cache::default(),
+            sparkline_cache: canvas::Cache::default(),
             chat_input: String::new(),
             chat_logs: HashMap::new(),
             chat_agents: Vec::new(),
@@ -332,6 +344,7 @@ impl App {
             session_transcripts: HashMap::new(),
             session_history_fetched: HashSet::new(),
             active_session_key: state.active_session_key.filter(|s| !s.is_empty()),
+            session_usage: HashMap::new(),
             pending_window: state.window,
             pending_window_since: None,
         }
@@ -511,16 +524,32 @@ impl App {
                 if changed {
                     tracing::info!(key = %session_key, "UI: session drill-in");
                     self.active_session_key = Some(session_key.clone());
+                    // New active session → sparkline needs to redraw
+                    // against whatever points are (or aren't) cached.
+                    self.sparkline_cache.clear();
                     ui_state::save(&self.ui_state_snapshot());
                 }
                 // Lazy hydrate: only fetch this session's transcript
-                // the first time it's opened per connection.
+                // the first time it's opened per connection. The
+                // timeseries fetch piggybacks off the same gate —
+                // no independent "usage fetched" bookkeeping to
+                // keep in sync.
                 if !self.session_history_fetched.contains(&session_key) {
                     self.session_history_fetched.insert(session_key.clone());
-                    if let Err(e) = crate::net::commands::sender().send(
-                        crate::net::commands::GatewayCommand::FetchSessionHistory { session_key },
-                    ) {
+                    let sender = crate::net::commands::sender();
+                    if let Err(e) =
+                        sender.send(crate::net::commands::GatewayCommand::FetchSessionHistory {
+                            session_key: session_key.clone(),
+                        })
+                    {
                         tracing::warn!(error = %e, "could not dispatch FetchSessionHistory");
+                    }
+                    if let Err(e) =
+                        sender.send(crate::net::commands::GatewayCommand::FetchSessionUsage {
+                            session_key,
+                        })
+                    {
+                        tracing::warn!(error = %e, "could not dispatch FetchSessionUsage");
                     }
                 }
                 Task::none()
@@ -900,6 +929,22 @@ impl App {
                 self.last_poll = Some(Instant::now());
                 self.chat_activities.remove(&agent_id);
             }
+            WsEvent::SessionUsageTimeseries {
+                session_key,
+                points,
+            } => {
+                tracing::info!(
+                    key = %session_key,
+                    count = points.len(),
+                    "session usage timeseries applied",
+                );
+                let affects_active =
+                    self.active_session_key.as_deref() == Some(session_key.as_str());
+                self.session_usage.insert(session_key, points);
+                if affects_active {
+                    self.sparkline_cache.clear();
+                }
+            }
             WsEvent::SessionHistory {
                 session_key,
                 messages,
@@ -1179,6 +1224,8 @@ impl App {
                 active_session_key: self.active_session_key.as_deref(),
                 transcripts: &self.session_transcripts,
                 hydrated: &self.session_history_fetched,
+                usage: &self.session_usage,
+                sparkline_cache: &self.sparkline_cache,
                 connected: self.connected,
             }),
             NavItem::Logs => logs_view::view(

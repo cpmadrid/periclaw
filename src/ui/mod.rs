@@ -7,5 +7,6 @@ pub mod chat_view;
 pub mod logs_view;
 pub mod sessions_view;
 pub mod sidebar;
+pub mod sparkline;
 pub mod status_bar;
 pub mod theme;

@@ -73,6 +73,10 @@ pub enum GatewayCommand {
     /// `agent:<agentId>:<sessionId>` form as it appears in
     /// `SessionInfo.key`.
     FetchSessionHistory { session_key: String },
+    /// Fetch `sessions.usage.timeseries` for the Sessions drill-in
+    /// sparkline. Gateway downsamples to 200 points max, so the
+    /// response is always bounded.
+    FetchSessionUsage { session_key: String },
 }
 
 struct Channel {
