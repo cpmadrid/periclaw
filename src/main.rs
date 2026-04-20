@@ -7,6 +7,7 @@ mod net;
 mod notifications;
 mod palette;
 mod scene;
+mod transcript;
 mod ui;
 mod ui_state;
 

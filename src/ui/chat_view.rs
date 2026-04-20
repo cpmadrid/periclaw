@@ -14,8 +14,8 @@
 use std::collections::VecDeque;
 use std::time::SystemTime;
 
-use iced::widget::{button, column, container, row, scrollable, text};
-use iced::{Alignment, Border, Color, Element, Length, Padding};
+use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow};
 
 use crate::Message;
 use crate::app::{ChatActivity, ChatActivityState};
@@ -177,7 +177,7 @@ fn right_pane<'a>(
         })
         .unwrap_or_else(|| (selected.as_str().to_string(), String::new()));
 
-    let header = column![
+    let title_col = column![
         text(display.clone()).size(16).color(*theme::FOREGROUND),
         if subtitle.is_empty() {
             text(format!("{} messages", log.map(VecDeque::len).unwrap_or(0)))
@@ -188,6 +188,20 @@ fn right_pane<'a>(
         },
     ]
     .spacing(2);
+
+    // "Copy transcript" button — only rendered when there's
+    // something to copy. Uses the shared `CopyToClipboard` message
+    // so the app's existing clipboard plumbing handles the OS call.
+    let copy_action: Option<Element<'a, Message>> = log.filter(|m| !m.is_empty()).map(|messages| {
+        let slice: Vec<ChatMessage> = messages.iter().cloned().collect();
+        let markdown = crate::transcript::to_markdown(&display, &slice);
+        copy_button("Copy transcript", markdown)
+    });
+
+    let mut header = row![title_col, Space::new().width(Length::Fill)].align_y(Alignment::Center);
+    if let Some(btn) = copy_action {
+        header = header.push(btn);
+    }
 
     let body: Element<'a, Message> = match log {
         Some(messages) if !messages.is_empty() => messages
@@ -272,4 +286,31 @@ fn activity_indicator<'a>(
     .width(Length::Fill)
     .padding(Padding::from([6, 24]))
     .into()
+}
+
+/// Small "Copy" button that dispatches the given text via the
+/// shared `CopyToClipboard` message. Shared between the Chat tab's
+/// header and the Sessions detail header via the `pub` export.
+pub fn copy_button<'a>(label: &'a str, payload: String) -> Element<'a, Message> {
+    button(text(label).size(11).color(*theme::FOREGROUND))
+        .on_press(Message::CopyToClipboard(payload))
+        .padding(Padding::from([4, 10]))
+        .style(|_, status| {
+            let bg = match status {
+                iced::widget::button::Status::Hovered => Some((*theme::SURFACE_3).into()),
+                _ => Some((*theme::SURFACE_2).into()),
+            };
+            iced::widget::button::Style {
+                background: bg,
+                text_color: *theme::FOREGROUND,
+                border: Border {
+                    color: *theme::BORDER,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                shadow: Shadow::default(),
+                ..Default::default()
+            }
+        })
+        .into()
 }

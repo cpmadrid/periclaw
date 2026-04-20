@@ -22,7 +22,7 @@ use iced::{Alignment, Border, Color, Element, Length, Padding};
 
 use crate::Message;
 use crate::net::rpc::{SessionInfo, SessionUsagePoint};
-use crate::ui::chat_view::ChatMessage;
+use crate::ui::chat_view::{self, ChatMessage};
 use crate::ui::sparkline::{self, TokenSparkline};
 use crate::ui::{chat_bubble, theme};
 
@@ -114,7 +114,7 @@ fn detail_pane<'a>(
     };
     let info = entries.iter().find(|i| i.key == key);
 
-    let header: Element<'a, Message> = match info {
+    let title_el: Element<'a, Message> = match info {
         Some(info) => detail_header(info),
         None => text(format!("session {key} not in list (waiting?)"))
             .size(12)
@@ -124,6 +124,26 @@ fn detail_pane<'a>(
 
     let transcript = snap.transcripts.get(key);
     let hydrated = snap.hydrated.contains(key);
+
+    // Copy button goes next to the title when there's a transcript
+    // to copy. Uses the same helper as the Chat tab for a single
+    // source of truth on styling and dispatch.
+    let header: Element<'a, Message> = match transcript {
+        Some(messages) if !messages.is_empty() => {
+            let title_text = display_key(key).to_string();
+            let slice: Vec<ChatMessage> = messages.iter().cloned().collect();
+            let markdown = crate::transcript::to_markdown(&title_text, &slice);
+            row![
+                title_el,
+                Space::new().width(Length::Fill),
+                chat_view::copy_button("Copy transcript", markdown),
+            ]
+            .align_y(Alignment::Center)
+            .into()
+        }
+        _ => title_el,
+    };
+
     let body: Element<'a, Message> = match transcript {
         Some(messages) if !messages.is_empty() => messages
             .iter()
