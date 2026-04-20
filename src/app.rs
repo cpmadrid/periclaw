@@ -13,11 +13,12 @@ use crate::net::rpc::{
     AgentInfo, ApprovalEventPayload, Channel, CronState, SessionInfo, SessionUsagePoint,
 };
 use crate::net::{WsEvent, events, mock, openclaw};
+use crate::palette::{self, PaletteAction, PaletteContext, PaletteEntry};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
 use crate::ui::chat_view::ChatMessage;
 use crate::ui::{
-    agent_card, agents_view, approvals, chat_input, chat_view, logs_view, sessions_view, sidebar,
-    status_bar, theme,
+    agent_card, agents_view, approvals, chat_input, chat_view, logs_view, palette as palette_view,
+    sessions_view, sidebar, status_bar, theme,
 };
 use crate::ui_state::{self, UiState, WindowState};
 
@@ -98,6 +99,24 @@ pub enum Message {
     /// connection. Persisted via `UiState` so the selection survives
     /// a relaunch.
     SessionSelected(String),
+    /// ⌘K / Ctrl+K hit — open the palette if closed, close if open.
+    /// On open, focuses the input via a `text_input::focus` task.
+    PaletteToggle,
+    /// Escape pressed or backdrop clicked — close the palette
+    /// without executing anything. Also resets the query and
+    /// selection so the next open starts fresh.
+    PaletteClose,
+    /// Operator typed in the palette input. Rebuilds the ranked
+    /// filter list and clamps the selection.
+    PaletteInputChanged(String),
+    /// Up/Down arrow — move selection by delta (-1 up, +1 down).
+    PaletteMove(i32),
+    /// Enter pressed in the input field — execute the currently-
+    /// selected entry.
+    PaletteExecute,
+    /// Operator clicked an entry row — execute it directly without
+    /// requiring a separate selection step.
+    PaletteSelectAndExecute(usize),
     /// Window was resized by the OS / compositor. Carries logical
     /// pixels. Debounced and persisted on the next `Tick` so a drag
     /// doesn't hammer the state file.
@@ -219,6 +238,21 @@ pub struct App {
     /// view. `None` means no session is selected and the detail
     /// pane shows its placeholder.
     pub active_session_key: Option<String>,
+    /// Palette overlay visibility. When true, the main view is
+    /// covered by a stack-layered palette widget that captures all
+    /// keyboard nav.
+    pub palette_open: bool,
+    /// Text typed into the palette search input. Empty on first
+    /// open; preserved across a close/reopen **within the same**
+    /// session (actually no — we reset on close so the next open
+    /// starts fresh, which matches operator muscle memory from
+    /// VSCode / Slack / etc.).
+    pub palette_input: String,
+    /// Index into the ranked-entries list that the operator has
+    /// arrow-keyed to. Clamped to the list length on each render,
+    /// so growing/shrinking the filter set never leaves the
+    /// selection dangling past the end.
+    pub palette_selected: usize,
     /// Token-usage time series per session, keyed by full session
     /// key. Drives the sparkline in the detail pane. Absent ≠ empty:
     /// a missing entry means "not fetched yet"; an empty Vec means
@@ -345,9 +379,78 @@ impl App {
             session_history_fetched: HashSet::new(),
             active_session_key: state.active_session_key.filter(|s| !s.is_empty()),
             session_usage: HashMap::new(),
+            palette_open: false,
+            palette_input: String::new(),
+            palette_selected: 0,
             pending_window: state.window,
             pending_window_since: None,
         }
+    }
+
+    /// Build the palette's action catalog from current state.
+    /// Called on every render and every input-changed message —
+    /// cheap (a few HashMap iterations); no caching warranted.
+    fn palette_entries(&self) -> Vec<PaletteEntry> {
+        // The catalog's "reset-session" entries gate on agent kind,
+        // so we need an `AgentId → AgentKind` map even though the
+        // rest of the app keys its kind info through the `roster`
+        // vec. Build one on the fly.
+        let mut agent_kind = HashMap::new();
+        for a in &self.roster {
+            agent_kind.insert(a.id.clone(), a.kind);
+        }
+        palette::build_entries(PaletteContext {
+            chat_agents: &self.chat_agents,
+            cron_details: &self.cron_details,
+            cron_ids: &self.cron_ids,
+            sessions: &self.sessions,
+            agent_kind: &agent_kind,
+        })
+    }
+
+    /// Dispatch the action behind the currently-selected entry.
+    /// Each `PaletteAction` variant maps to an existing top-level
+    /// `Message`, so this is just a match + recursive update call —
+    /// no new runtime behavior is introduced by the palette.
+    fn palette_execute(&mut self, ranked_idx: usize) -> Task<Message> {
+        let entries = self.palette_entries();
+        let ranked = palette::rank(&entries, &self.palette_input);
+        let Some((entry_idx, _)) = ranked.get(ranked_idx).copied() else {
+            // No-op — selection pointing past the list (e.g. from
+            // a race with filter narrowing). Close the palette so
+            // the operator doesn't sit with a non-responsive state.
+            self.palette_open = false;
+            return Task::none();
+        };
+        let Some(entry) = entries.get(entry_idx) else {
+            self.palette_open = false;
+            return Task::none();
+        };
+        // Close the palette before dispatching so the downstream
+        // handler (which may also mutate state) renders on top of
+        // a clean layout.
+        self.palette_open = false;
+        self.palette_input.clear();
+        self.palette_selected = 0;
+        let message = match entry.action.clone() {
+            PaletteAction::Nav(nav) => Message::NavClicked(nav),
+            PaletteAction::RunCron(id) => Message::RunCron(id),
+            PaletteAction::ChatWithAgent(id) => {
+                // Switch to Chat tab first, then select the agent —
+                // two chained updates so the operator lands on the
+                // right surface for their intent.
+                let sub = self.update(Message::NavClicked(NavItem::Chat));
+                let sub2 = self.update(Message::SelectChatAgent(id));
+                return Task::batch([sub, sub2]);
+            }
+            PaletteAction::OpenSession(key) => {
+                let sub = self.update(Message::NavClicked(NavItem::Sessions));
+                let sub2 = self.update(Message::SessionSelected(key));
+                return Task::batch([sub, sub2]);
+            }
+            PaletteAction::ResetMainSession(id) => Message::ResetMainSession(id),
+        };
+        self.update(message)
     }
 
     /// Snapshot the bits of the app we persist across launches.
@@ -519,6 +622,61 @@ impl App {
                 }
                 Task::none()
             }
+            Message::PaletteToggle => {
+                if self.palette_open {
+                    self.palette_open = false;
+                    self.palette_input.clear();
+                    self.palette_selected = 0;
+                    Task::none()
+                } else {
+                    self.palette_open = true;
+                    self.palette_selected = 0;
+                    // Focus the text_input so typing starts
+                    // immediately — Iced's input_id lookup lives in
+                    // the palette UI module.
+                    iced::widget::operation::focus(palette_view::input_id())
+                }
+            }
+            Message::PaletteClose => {
+                self.palette_open = false;
+                self.palette_input.clear();
+                self.palette_selected = 0;
+                Task::none()
+            }
+            Message::PaletteInputChanged(value) => {
+                self.palette_input = value;
+                // Re-rank can shorten the list; clamp selection so
+                // it stays inside bounds for the new filter set.
+                let entries = self.palette_entries();
+                let ranked = palette::rank(&entries, &self.palette_input);
+                if ranked.is_empty() {
+                    self.palette_selected = 0;
+                } else if self.palette_selected >= ranked.len() {
+                    self.palette_selected = ranked.len() - 1;
+                }
+                Task::none()
+            }
+            Message::PaletteMove(delta) => {
+                if !self.palette_open {
+                    return Task::none();
+                }
+                let entries = self.palette_entries();
+                let ranked = palette::rank(&entries, &self.palette_input);
+                if ranked.is_empty() {
+                    return Task::none();
+                }
+                let len = ranked.len() as i32;
+                let mut next = self.palette_selected as i32 + delta;
+                // Wrap around — Spotlight-style; feels natural for a
+                // short list and avoids "stuck at top/bottom" friction.
+                while next < 0 {
+                    next += len;
+                }
+                self.palette_selected = (next % len) as usize;
+                Task::none()
+            }
+            Message::PaletteExecute => self.palette_execute(self.palette_selected),
+            Message::PaletteSelectAndExecute(idx) => self.palette_execute(idx),
             Message::SessionSelected(session_key) => {
                 let changed = self.active_session_key.as_deref() != Some(session_key.as_str());
                 if changed {
@@ -1236,13 +1394,30 @@ impl App {
             NavItem::Settings => coming_soon("Settings"),
         };
 
-        iced::widget::container(iced::widget::row![sidebar::view(self.nav), main].spacing(0))
+        let base =
+            iced::widget::container(iced::widget::row![sidebar::view(self.nav), main].spacing(0))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some((*theme::SURFACE_0).into()),
+                    ..Default::default()
+                });
+
+        if !self.palette_open {
+            return base.into();
+        }
+
+        // Palette is open — layer the overlay on top of the base
+        // view via `stack`. Ranking happens here (once per render)
+        // so the view stays a pure function of App state.
+        let entries = self.palette_entries();
+        let ranked = palette::rank(&entries, &self.palette_input);
+        let selected = self.palette_selected.min(ranked.len().saturating_sub(1));
+        let overlay = palette_view::view(&self.palette_input, entries, ranked, selected);
+
+        iced::widget::stack![base, overlay]
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(|_| iced::widget::container::Style {
-                background: Some((*theme::SURFACE_0).into()),
-                ..Default::default()
-            })
             .into()
     }
 
@@ -1321,10 +1496,12 @@ impl App {
             Subscription::run(openclaw::connect).map(Message::Ws)
         };
 
-        // Window move/resize events route into the debounced save
-        // path. `listen_with` wants a plain `fn` — the filter body
-        // stays outside the closure so it can stay that shape.
-        let window_events = iced::event::listen_with(window_event_filter);
+        // Window + keyboard events both route through a single
+        // `listen_with`. The filter must be a plain `fn` (no
+        // captures), so palette-specific messages emitted here
+        // are gated on `palette_open` inside their handlers
+        // rather than via closure state.
+        let app_events = iced::event::listen_with(global_event_filter);
 
         // Three-tier tick so the office feels alive without burning
         // CPU on a quiet scene:
@@ -1345,7 +1522,7 @@ impl App {
         };
         let tick = time::every(tick_interval).map(|_| Message::Tick);
 
-        Subscription::batch([ws, tick, window_events])
+        Subscription::batch([ws, tick, app_events])
     }
 
     pub fn theme(&self) -> iced::Theme {
@@ -1449,21 +1626,44 @@ fn clean_bubble_text(raw: &str, max: usize) -> String {
     out
 }
 
-/// Narrow the global Iced event stream to just the two window-level
-/// changes we care about for state persistence. Must be a bare `fn`
-/// (no captures) because `iced::event::listen_with` takes a function
-/// pointer.
-fn window_event_filter(
+/// Global event filter covering both window-level changes (resize,
+/// move) for state persistence AND keyboard shortcuts for the
+/// command palette. Must be a bare `fn` (no captures) because
+/// `iced::event::listen_with` takes a function pointer — palette
+/// messages are emitted unconditionally and gated in their
+/// handlers on `palette_open`.
+fn global_event_filter(
     event: iced::Event,
     _status: iced::event::Status,
     _window: iced::window::Id,
 ) -> Option<Message> {
+    use iced::keyboard::key::Named;
     match event {
         iced::Event::Window(iced::window::Event::Resized(size)) => {
             Some(Message::WindowResized(size.width, size.height))
         }
         iced::Event::Window(iced::window::Event::Moved(point)) => {
             Some(Message::WindowMoved(point.x, point.y))
+        }
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+            // ⌘K / Ctrl+K opens-or-closes the palette from
+            // anywhere in the app. Test `command()` rather than
+            // splitting cases per-platform — Iced normalizes
+            // this for us.
+            if modifiers.command()
+                && matches!(&key, iced::keyboard::Key::Character(s) if s.as_ref() == "k")
+            {
+                return Some(Message::PaletteToggle);
+            }
+            // Navigation keys are only meaningful inside the
+            // palette — the handlers no-op when it's closed so
+            // emitting unconditionally is safe.
+            match key {
+                iced::keyboard::Key::Named(Named::Escape) => Some(Message::PaletteClose),
+                iced::keyboard::Key::Named(Named::ArrowUp) => Some(Message::PaletteMove(-1)),
+                iced::keyboard::Key::Named(Named::ArrowDown) => Some(Message::PaletteMove(1)),
+                _ => None,
+            }
         }
         _ => None,
     }

@@ -5,6 +5,7 @@ pub mod chat_bubble;
 pub mod chat_input;
 pub mod chat_view;
 pub mod logs_view;
+pub mod palette;
 pub mod sessions_view;
 pub mod sidebar;
 pub mod sparkline;
