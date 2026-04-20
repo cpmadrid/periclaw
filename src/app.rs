@@ -94,6 +94,11 @@ pub enum Message {
     /// dispatches `sessions.reset`. Auto-disarms after the window
     /// elapses without a second click.
     ResetMainSession(AgentId),
+    /// Click on an agent's error row — flip it between the
+    /// truncated one-liner and the full expanded text. Target only
+    /// exists when the agent has a `last_error` to show, so a
+    /// stale dispatch is a no-op beyond set toggling.
+    ToggleAgentError(AgentId),
     /// Operator clicked a session card in the Sessions tab. Updates
     /// `active_session_key` and kicks off `chat.history` for that
     /// session if the transcript isn't already cached for this
@@ -225,6 +230,12 @@ pub struct App {
     /// [`RESET_CONFIRM_WINDOW`] actually fires the RPC. Stale entries
     /// are pruned each `Tick`.
     pub pending_resets: HashMap<AgentId, Instant>,
+    /// Agent ids whose error row is currently expanded on the
+    /// Agents tab. Transient view-state; not persisted across
+    /// restarts because last-error text changes on the server's
+    /// cadence and expanding yesterday's error tomorrow isn't
+    /// useful.
+    pub expanded_errors: HashSet<AgentId>,
     /// Per-session transcripts for the Sessions tab's drill-in. Keyed
     /// by the fully-qualified `agent:<id>:<sessionId>` key the gateway
     /// uses. Separate from `chat_logs` (which keys by agent id and
@@ -382,6 +393,7 @@ impl App {
             history_fetched: HashSet::new(),
             chat_activities: HashMap::new(),
             pending_resets: HashMap::new(),
+            expanded_errors: HashSet::new(),
             session_transcripts: HashMap::new(),
             session_history_fetched: HashSet::new(),
             active_session_key: state.active_session_key.filter(|s| !s.is_empty()),
@@ -717,6 +729,12 @@ impl App {
                     {
                         tracing::warn!(error = %e, "could not dispatch FetchSessionUsage");
                     }
+                }
+                Task::none()
+            }
+            Message::ToggleAgentError(agent_id) => {
+                if !self.expanded_errors.remove(&agent_id) {
+                    self.expanded_errors.insert(agent_id);
                 }
                 Task::none()
             }
@@ -1396,6 +1414,7 @@ impl App {
                 active_model: self.active_model.as_deref(),
                 sessions: &self.sessions,
                 pending_resets: &self.pending_resets,
+                expanded_errors: &self.expanded_errors,
             }),
             NavItem::Chat => chat_view::view(
                 &self.chat_agents,

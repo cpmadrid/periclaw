@@ -38,6 +38,17 @@ pub struct AgentsViewSnapshot<'a> {
     /// the button in red "Confirm reset?" form instead of the neutral
     /// "Reset session". Absence means the neutral form is shown.
     pub pending_resets: &'a HashMap<AgentId, Instant>,
+    /// Agent ids whose error row is expanded (full text shown
+    /// instead of truncated). Toggled by `Message::ToggleAgentError`.
+    pub expanded_errors: &'a std::collections::HashSet<AgentId>,
+}
+
+/// Detail lines split so the caller can render the `error` row
+/// differently (expandable toggle, red color, wrap) from the
+/// neutral schedule / session lines.
+struct AgentDetail {
+    lines: Vec<String>,
+    error: Option<String>,
 }
 
 pub fn view<'a>(snap: AgentsViewSnapshot<'a>) -> Element<'a, Message> {
@@ -143,17 +154,22 @@ fn agent_row<'a>(agent: &'a Agent, snap: &AgentsViewSnapshot<'a>) -> Element<'a,
     }
     header = header.push(badge);
 
-    let detail_lines = match agent.kind {
-        AgentKind::Cron => cron_detail_lines(&agent.id, snap),
-        AgentKind::Channel => channel_detail_lines(&agent.id, snap),
-        AgentKind::Main => main_detail_lines(snap),
+    let detail = match agent.kind {
+        AgentKind::Cron => cron_detail(&agent.id, snap),
+        AgentKind::Channel => channel_detail(&agent.id, snap),
+        AgentKind::Main => main_detail(snap),
     };
 
-    let detail_col = detail_lines
+    let mut detail_col = detail
+        .lines
         .into_iter()
         .fold(column![].spacing(3), |acc, line| {
             acc.push(text(line).size(11).color(*theme::MUTED))
         });
+    if let Some(err) = detail.error {
+        let expanded = snap.expanded_errors.contains(&agent.id);
+        detail_col = detail_col.push(error_row(agent.id.clone(), err, expanded));
+    }
 
     container(column![header, detail_col].spacing(8))
         .width(Length::Fill)
@@ -170,9 +186,12 @@ fn agent_row<'a>(agent: &'a Agent, snap: &AgentsViewSnapshot<'a>) -> Element<'a,
         .into()
 }
 
-fn cron_detail_lines(id: &AgentId, snap: &AgentsViewSnapshot<'_>) -> Vec<String> {
+fn cron_detail(id: &AgentId, snap: &AgentsViewSnapshot<'_>) -> AgentDetail {
     let Some(state) = snap.cron_details.get(id) else {
-        return vec!["no state yet".into()];
+        return AgentDetail {
+            lines: vec!["no state yet".into()],
+            error: None,
+        };
     };
     let mut lines = Vec::new();
     if let Some(last_status) = state.last_status.as_deref() {
@@ -191,32 +210,34 @@ fn cron_detail_lines(id: &AgentId, snap: &AgentsViewSnapshot<'_>) -> Vec<String>
     if let Some(next_ms) = state.next_run_at_ms {
         lines.push(format!("next: {}", format_time_until(next_ms)));
     }
-    if let Some(err) = state.last_error.as_deref() {
-        lines.push(format!("error: {}", truncate(err, 100)));
-    }
-    if lines.is_empty() {
+    if lines.is_empty() && state.last_error.is_none() {
         lines.push("no recent runs".into());
     }
-    lines
+    AgentDetail {
+        lines,
+        error: state.last_error.clone(),
+    }
 }
 
-fn channel_detail_lines(id: &AgentId, snap: &AgentsViewSnapshot<'_>) -> Vec<String> {
+fn channel_detail(id: &AgentId, snap: &AgentsViewSnapshot<'_>) -> AgentDetail {
     let Some(ch) = snap.channel_details.get(id) else {
-        return vec!["no state yet".into()];
+        return AgentDetail {
+            lines: vec!["no state yet".into()],
+            error: None,
+        };
     };
-    let mut lines = Vec::new();
-    lines.push(format!(
+    let lines = vec![format!(
         "configured: {} · connected: {}",
         yes_no(ch.enabled),
         yes_no(ch.connected),
-    ));
-    if let Some(err) = ch.last_error.as_deref() {
-        lines.push(format!("error: {}", truncate(err, 100)));
+    )];
+    AgentDetail {
+        lines,
+        error: ch.last_error.clone(),
     }
-    lines
 }
 
-fn main_detail_lines<'a>(snap: &AgentsViewSnapshot<'a>) -> Vec<String> {
+fn main_detail<'a>(snap: &AgentsViewSnapshot<'a>) -> AgentDetail {
     let mut lines = Vec::new();
     if let Some(model) = snap.active_model {
         lines.push(format!("model: {model}"));
@@ -229,7 +250,54 @@ fn main_detail_lines<'a>(snap: &AgentsViewSnapshot<'a>) -> Vec<String> {
     if lines.is_empty() {
         lines.push("no session data yet".into());
     }
-    lines
+    AgentDetail { lines, error: None }
+}
+
+/// Expandable error row — truncated one-liner by default, click the
+/// chevron (▸/▾) to swap in the full text. Uses the app's
+/// `expanded_errors` set as the source of truth; toggle dispatches
+/// a Message that updates the set and re-renders.
+fn error_row(agent_id: AgentId, err: String, expanded: bool) -> Element<'static, Message> {
+    let indicator = if expanded { "▾" } else { "▸" };
+    let body = if expanded {
+        err.clone()
+    } else {
+        truncate(&err, 100)
+    };
+    button(
+        row![
+            text(indicator).size(10).color(*theme::STATUS_DOWN),
+            text(format!("error: {body}"))
+                .size(11)
+                .color(*theme::STATUS_DOWN),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Start),
+    )
+    .on_press(Message::ToggleAgentError(agent_id))
+    .width(Length::Fill)
+    .padding(Padding::from([0, 0]))
+    .style(|_, status| {
+        let bg = matches!(status, iced::widget::button::Status::Hovered).then(|| {
+            iced::Color {
+                a: 0.12,
+                ..*theme::STATUS_DOWN
+            }
+            .into()
+        });
+        iced::widget::button::Style {
+            background: bg,
+            text_color: *theme::STATUS_DOWN,
+            border: Border {
+                color: iced::Color::TRANSPARENT,
+                width: 0.0,
+                radius: 3.0.into(),
+            },
+            shadow: iced::Shadow::default(),
+            ..Default::default()
+        }
+    })
+    .into()
 }
 
 /// "Reset session" button with two-click confirmation. The armed
