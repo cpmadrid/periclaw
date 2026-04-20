@@ -193,10 +193,15 @@ pub struct App {
     /// [`TRANSITION_FLASH`] are pruned each tick.
     pub transition_moments: HashMap<AgentId, Instant>,
     pub scene_cache: canvas::Cache,
-    /// Cache for the Sessions tab's token-usage sparkline. Cleared
+    /// Cache for the Sessions tab's detail-pane sparkline. Cleared
     /// whenever the active session's points change so the canvas
     /// re-renders only when there's something new to draw.
     pub sparkline_cache: canvas::Cache,
+    /// Per-row mini-sparkline caches, keyed by session key. Lazily
+    /// populated as `sessions.usage.timeseries` responses arrive;
+    /// each entry's cache is cleared in place when its points
+    /// update so only the affected row redraws.
+    pub row_sparkline_caches: HashMap<String, canvas::Cache>,
     /// Contents of the chat input field (shared across Overview and
     /// Chat tabs). Cleared on agent switch so a half-typed message
     /// for Sebastian doesn't carry over into a reply to memoria.
@@ -393,6 +398,7 @@ impl App {
             transition_moments: HashMap::new(),
             scene_cache: canvas::Cache::default(),
             sparkline_cache: canvas::Cache::default(),
+            row_sparkline_caches: HashMap::new(),
             chat_input: String::new(),
             chat_logs: HashMap::new(),
             chat_agents: Vec::new(),
@@ -1165,6 +1171,15 @@ impl App {
                 );
                 let affects_active =
                     self.active_session_key.as_deref() == Some(session_key.as_str());
+                // Ensure this session has a row-sparkline cache and
+                // invalidate it so the mini-chart redraws with the
+                // new points. `or_default` inserts an empty Cache
+                // when this is the first time we've heard about
+                // this session.
+                self.row_sparkline_caches
+                    .entry(session_key.clone())
+                    .or_default()
+                    .clear();
                 self.session_usage.insert(session_key, points);
                 if affects_active {
                     self.sparkline_cache.clear();
@@ -1458,6 +1473,7 @@ impl App {
                 hydrated: &self.session_history_fetched,
                 usage: &self.session_usage,
                 sparkline_cache: &self.sparkline_cache,
+                row_sparkline_caches: &self.row_sparkline_caches,
                 connected: self.connected,
             }),
             NavItem::Logs => logs_view::view(

@@ -37,7 +37,12 @@ pub struct SessionsViewSnapshot<'a> {
     /// Per-session usage timeseries. Absence = "not fetched yet";
     /// empty Vec = "fetched, session has no recorded points".
     pub usage: &'a HashMap<String, Vec<SessionUsagePoint>>,
+    /// Canvas cache for the detail-pane sparkline.
     pub sparkline_cache: &'a iced::widget::canvas::Cache,
+    /// Per-row canvas caches for the list pane's mini sparklines.
+    /// Rows without a corresponding cache render without a
+    /// sparkline (i.e. before the first timeseries response).
+    pub row_sparkline_caches: &'a HashMap<String, iced::widget::canvas::Cache>,
     pub connected: bool,
 }
 
@@ -51,7 +56,7 @@ pub fn view<'a>(snap: SessionsViewSnapshot<'a>) -> Element<'a, Message> {
             .then_with(|| a.key.cmp(&b.key))
     });
 
-    let list = list_pane(&entries, snap.active_session_key);
+    let list = list_pane(&entries, &snap);
     let detail = detail_pane(&entries, &snap);
 
     row![list, detail]
@@ -61,7 +66,11 @@ pub fn view<'a>(snap: SessionsViewSnapshot<'a>) -> Element<'a, Message> {
         .into()
 }
 
-fn list_pane<'a>(entries: &[&'a SessionInfo], active_key: Option<&'a str>) -> Element<'a, Message> {
+fn list_pane<'a>(
+    entries: &[&'a SessionInfo],
+    snap: &SessionsViewSnapshot<'a>,
+) -> Element<'a, Message> {
+    let active_key = snap.active_session_key;
     let header = column![
         text("Sessions").size(16).color(*theme::FOREGROUND),
         text(format!("{} tracked", entries.len()))
@@ -79,7 +88,18 @@ fn list_pane<'a>(entries: &[&'a SessionInfo], active_key: Option<&'a str>) -> El
         entries
             .iter()
             .fold(column![].spacing(6), |acc, info| {
-                acc.push(session_card(info, Some(info.key.as_str()) == active_key))
+                let active = Some(info.key.as_str()) == active_key;
+                // Only show a mini sparkline when both the data
+                // AND the cache exist — we guarantee both are
+                // present together because the
+                // SessionUsageTimeseries handler inserts into
+                // `row_sparkline_caches` whenever it updates
+                // `session_usage`.
+                let mini = snap
+                    .usage
+                    .get(info.key.as_str())
+                    .zip(snap.row_sparkline_caches.get(info.key.as_str()));
+                acc.push(session_card(info, active, mini))
             })
             .into()
     };
@@ -219,7 +239,11 @@ fn detail_header<'a>(info: &'a SessionInfo) -> Element<'a, Message> {
     .into()
 }
 
-fn session_card(info: &SessionInfo, active: bool) -> Element<'_, Message> {
+fn session_card<'a>(
+    info: &'a SessionInfo,
+    active: bool,
+    mini: Option<(&'a Vec<SessionUsagePoint>, &'a iced::widget::canvas::Cache)>,
+) -> Element<'a, Message> {
     let title = display_key(&info.key);
     let model = info
         .model
@@ -252,8 +276,20 @@ fn session_card(info: &SessionInfo, active: bool) -> Element<'_, Message> {
         *theme::BORDER
     };
 
+    let mut inner = column![header, details].spacing(6);
+    if let Some((points, cache)) = mini {
+        let widget = canvas(TokenSparkline {
+            points,
+            context_budget: info.context_tokens,
+            cache,
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(MINI_SPARKLINE_HEIGHT));
+        inner = inner.push(widget);
+    }
+
     let session_key = info.key.clone();
-    button(column![header, details].spacing(6))
+    button(inner)
         .on_press(Message::SessionSelected(session_key))
         .width(Length::Fill)
         .padding(Padding::from([10, 12]))
@@ -269,6 +305,13 @@ fn session_card(info: &SessionInfo, active: bool) -> Element<'_, Message> {
         })
         .into()
 }
+
+/// Mini sparkline height for list rows — short enough not to
+/// dominate a card's vertical space, tall enough to trace growth
+/// shape. Below this the detail-pane sparkline's `MIN_HEIGHT`
+/// kicks in with placeholder text; we rely on only rendering the
+/// mini when there's actual data.
+const MINI_SPARKLINE_HEIGHT: f32 = 24.0;
 
 fn placeholder(msg: &'static str) -> Element<'static, Message> {
     container(text(msg).size(12).color(*theme::MUTED))
