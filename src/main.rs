@@ -49,7 +49,7 @@ fn main() -> iced::Result {
         app::App::update,
         app::App::view,
     )
-    .title("Mission Control")
+    .title("Periclaw")
     .theme(app::App::theme)
     .subscription(app::App::subscription)
     .window(iced::window::Settings {

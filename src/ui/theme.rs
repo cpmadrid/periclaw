@@ -61,9 +61,9 @@ pub static STATUS_UNKNOWN: LazyLock<Color> = LazyLock::new(|| oklch(0.35, 0.03, 
 pub static BORDER: LazyLock<Color> = LazyLock::new(|| oklch_a(0.55, 0.15, 155.0, 0.30));
 
 /// Build the Iced custom theme for the app.
-pub fn mission_control_theme() -> iced::Theme {
+pub fn periclaw_theme() -> iced::Theme {
     iced::Theme::custom(
-        "Mission Control".to_string(),
+        "Periclaw".to_string(),
         iced::theme::Palette {
             background: *SURFACE_0,
             text: *FOREGROUND,

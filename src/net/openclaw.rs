@@ -350,7 +350,7 @@ async fn session(
         "maxProtocol": 3,
         "client": {
             "id": client_id,
-            "displayName": "Mission Control Desktop",
+            "displayName": "Periclaw",
             "version": env!("CARGO_PKG_VERSION"),
             "platform": std::env::consts::OS,
             "mode": client_mode,

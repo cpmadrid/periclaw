@@ -1618,7 +1618,7 @@ impl App {
     }
 
     pub fn theme(&self) -> iced::Theme {
-        theme::mission_control_theme()
+        theme::periclaw_theme()
     }
 }
 
