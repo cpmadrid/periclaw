@@ -43,6 +43,34 @@ pub struct UiState {
     pub active_session_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<WindowState>,
+    /// Persisted connection settings — gateway URL and data-source mode.
+    /// Secrets (token) do NOT live here; they route through
+    /// `crate::secret_store` to the OS keychain (release) or a 0600
+    /// plaintext fallback (debug). See `src/secret_store.rs`.
+    #[serde(default, skip_serializing_if = "Settings::is_empty")]
+    pub settings: Settings,
+}
+
+/// Non-secret connection settings. Absent fields mean "not configured";
+/// the resolver layer in `config.rs` treats that as "fall back to env
+/// var or error out."
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Settings {
+    /// WebSocket URL for the OpenClaw gateway (`ws://` or `wss://`).
+    /// When `None`, the ws subscription stays idle and the Settings tab
+    /// shows a first-run banner asking the user to configure one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_url: Option<String>,
+    /// `"auto"`, `"ws"`, or `"mock"`. Honored when `OPENCLAW_MOCK` is
+    /// unset in the environment — if the env var is set, it wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+impl Settings {
+    fn is_empty(&self) -> bool {
+        self.gateway_url.is_none() && self.mode.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -196,6 +224,10 @@ mod tests {
                 height: 900.0,
                 position: Some((120.0, 80.0)),
             }),
+            settings: Settings {
+                gateway_url: Some("wss://gw.example/".to_string()),
+                mode: Some("ws".to_string()),
+            },
         };
         let raw = serde_json::to_string(&original).unwrap();
         let parsed: UiState = serde_json::from_str(&raw).unwrap();
@@ -209,6 +241,8 @@ mod tests {
         assert_eq!(w.width, 1440.0);
         assert_eq!(w.height, 900.0);
         assert_eq!(w.position, Some((120.0, 80.0)));
+        assert_eq!(parsed.settings.gateway_url.as_deref(), Some("wss://gw.example/"));
+        assert_eq!(parsed.settings.mode.as_deref(), Some("ws"));
     }
 
     #[test]
@@ -220,5 +254,23 @@ mod tests {
         assert_eq!(parsed.tab.as_deref(), Some("logs"));
         assert!(parsed.selected_agent.is_none());
         assert!(parsed.window.is_none());
+        // The `settings` field was added after the initial release; old
+        // state files without it must deserialize into the default
+        // (empty) settings rather than fail.
+        assert!(parsed.settings.gateway_url.is_none());
+        assert!(parsed.settings.mode.is_none());
+    }
+
+    #[test]
+    fn empty_settings_omitted_from_serialized_form() {
+        // Default settings should not pollute the saved JSON with an
+        // empty `"settings": {}` — `is_empty()` skip keeps the file
+        // terse and matches how other optional fields behave.
+        let state = UiState {
+            tab: Some("overview".to_string()),
+            ..UiState::default()
+        };
+        let raw = serde_json::to_string(&state).unwrap();
+        assert!(!raw.contains("settings"), "serialized was: {raw}");
     }
 }

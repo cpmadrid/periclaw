@@ -1,22 +1,32 @@
-//! Token bootstrap and config paths.
+//! Gateway URL + token resolution.
 //!
-//! **Lookup order** (first hit wins):
-//! 1. `OPENCLAW_TOKEN` env var — the preferred source of truth;
-//!    when present we never fall through.
-//! 2. Plaintext fallback file at `$XDG_CONFIG_HOME/periclaw/gateway-token`
-//!    (mode 0600).
-//! 3. OS keychain — only a read path, kept for backward-compat with
-//!    installs that stashed here under older builds.
-//! 4. Bootstrap from `~/.openclaw/openclaw.json` → `auth.token`.
+//! ## Gateway URL
 //!
-//! **Writes go to the file, not the keychain.** On macOS dev builds
-//! the code-signing identity changes every `cargo run`, so the OS
-//! treats a keychain write as a fresh app asking for confidential
-//! access and prompts for the login password — every launch. Writing
-//! to a 0600 file under the user's config dir matches OpenClaw's own
-//! secrets layout and avoids the prompt entirely. The keychain read
-//! path is still consulted so an older install with a stashed token
-//! keeps working until it's migrated.
+//! [`gateway_url`] resolves the ws endpoint from (in order):
+//!
+//! 1. `OPENCLAW_GATEWAY_URL` env var — wins when set, for CI / Doppler
+//!    / one-shot overrides.
+//! 2. Persisted setting (typically `UiState.settings.gateway_url`,
+//!    threaded in by the caller).
+//! 3. `None` — the ws subscription stays idle and the Settings tab's
+//!    first-run banner asks the operator to configure one.
+//!
+//! ## Token
+//!
+//! [`try_load_token`] follows the same env-wins-then-persisted rule,
+//! but persistence lives in [`crate::secret_store`] (keychain in
+//! release, 0600 file in debug). See that module for storage details.
+//!
+//! **Last-resort bootstrap**: if no token is available from env or
+//! the secret store, we check `~/.openclaw/openclaw.json` for an
+//! `auth.token`. This is purely a convenience for OpenClaw-CLI users
+//! — it lets a co-installed gateway's token pair work automatically
+//! on first launch. A successful bootstrap writes the token to the
+//! secret store for future launches.
+//!
+//! Returning `None` is valid — that's the Tailscale-Serve case where
+//! the gateway authenticates via whois headers and a client-side
+//! token would only interfere.
 
 use std::fs;
 use std::path::PathBuf;
@@ -24,22 +34,25 @@ use std::path::PathBuf;
 use directories::{BaseDirs, UserDirs};
 use serde::Deserialize;
 
-const KEYRING_SERVICE: &str = "com.cpmadrid.periclaw";
-const KEYRING_USER: &str = "openclaw-gateway-token";
+use crate::secret_store;
 
-/// Resolve the gateway URL from `OPENCLAW_GATEWAY_URL`. Returns `None`
-/// when the env var is unset or empty — callers should surface a
-/// helpful error rather than fall back to a hardcoded endpoint.
+/// Resolve the gateway URL. Env var wins, persisted setting (pass
+/// `Some(state.settings.gateway_url.as_deref())`) is the fallback.
+/// Returns `None` when neither is set — the caller should either
+/// stay idle (ws path) or skip connecting (mock path).
 ///
 /// The WS path is the root (`/`). Do NOT point this at
-/// `/__openclaw__/ws`, which is the canvas WS path (different protocol,
-/// intercepts WS upgrades first). Gateway WS lives at root and falls
-/// through after canvas declines.
-pub fn gateway_url() -> Option<String> {
-    std::env::var("OPENCLAW_GATEWAY_URL").ok().and_then(|s| {
-        let t = s.trim();
-        (!t.is_empty()).then(|| t.to_string())
-    })
+/// `/__openclaw__/ws`, which is the canvas WS path (different
+/// protocol, intercepts WS upgrades first). Gateway WS lives at root
+/// and falls through after canvas declines.
+pub fn gateway_url(persisted: Option<&str>) -> Option<String> {
+    if let Some(url) = env_str("OPENCLAW_GATEWAY_URL") {
+        return Some(url);
+    }
+    persisted
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,17 +69,15 @@ pub enum ConfigError {
     Parse(#[from] serde_json::Error),
     #[error("openclaw.json present but has no auth.token")]
     MissingToken,
-    #[error("keyring error: {0}")]
-    Keyring(#[from] keyring::Error),
-    #[error("file write error: {0}")]
+    #[error("secret store: {0}")]
+    Secret(#[from] secret_store::SecretStoreError),
+    #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// Try to load a gateway token. Returns `None` when no token is
-/// available — that's the Tailscale-Serve case, where the gateway
-/// authenticates the connection via Tailscale whois headers and a
-/// client-side token would only interfere (it flips the gateway into
-/// token-comparison mode; see `openclaw/src/gateway/auth.ts:577`).
+/// Best-effort token resolution. Logs at debug and returns `None` on
+/// any failure — callers should treat `None` as "no token, try
+/// ambient auth" rather than as an error.
 pub fn try_load_token() -> Option<String> {
     match load_token() {
         Ok(tok) => Some(tok),
@@ -77,50 +88,36 @@ pub fn try_load_token() -> Option<String> {
     }
 }
 
-/// Load the OpenClaw gateway token. See module docs for the lookup
-/// order. Writes persist to the plaintext fallback file (0600); the
-/// keychain is read-only to avoid prompting on macOS dev builds.
+/// Resolve the gateway token. Env > secret store > openclaw.json
+/// bootstrap. The bootstrap path, when it succeeds, also stashes the
+/// token in the secret store so the next launch skips `~/.openclaw`
+/// entirely.
 pub fn load_token() -> Result<String, ConfigError> {
-    if let Ok(tok) = std::env::var("OPENCLAW_TOKEN") {
-        let tok = tok.trim().to_string();
-        if !tok.is_empty() {
-            // Env var is the preferred source — use it directly. No
-            // stash: writing to the keychain here triggers a
-            // login-password prompt on every dev launch because the
-            // binary signature changes with each build.
-            tracing::debug!("OPENCLAW_TOKEN env var provided");
-            return Ok(tok);
-        }
-    }
-
-    if let Some(tok) = try_plaintext_fallback()? {
-        tracing::debug!("token loaded from plaintext fallback file");
+    if let Some(tok) = env_str("OPENCLAW_TOKEN") {
+        tracing::debug!("OPENCLAW_TOKEN env var provided");
         return Ok(tok);
     }
 
-    if let Some(tok) = try_keyring() {
-        tracing::debug!("token loaded from keyring (legacy install)");
-        // Mirror into the file so the next launch doesn't consult
-        // the keychain at all — best-effort; the legacy read path
-        // still works if this fails.
-        if let Err(e) = write_plaintext_fallback(&tok) {
-            tracing::debug!(error = %e, "could not mirror keychain token to fallback file");
-        }
+    if let Some(tok) = secret_store::load_token() {
+        tracing::debug!("token loaded from secret store");
         return Ok(tok);
     }
 
     tracing::info!("bootstrapping token from ~/.openclaw/openclaw.json");
     let tok = read_openclaw_config()?;
-    if let Err(e) = write_plaintext_fallback(&tok) {
-        tracing::warn!(error = %e, "could not persist bootstrapped token to fallback file");
+    if let Err(e) = secret_store::save_token(&tok) {
+        tracing::warn!(error = %e, "could not persist bootstrapped token to secret store");
     }
     Ok(tok)
 }
 
-fn try_keyring() -> Option<String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-        .ok()
-        .and_then(|entry| entry.get_password().ok())
+/// Read a trimmed, non-empty env var. Returns `None` when unset or
+/// whitespace-only — the call sites all want this exact semantics.
+fn env_str(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|s| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,41 +153,6 @@ fn read_openclaw_config() -> Result<String, ConfigError> {
 fn openclaw_config_path() -> Result<PathBuf, ConfigError> {
     let home = UserDirs::new().ok_or(ConfigError::NoHome)?;
     Ok(home.home_dir().join(".openclaw").join("openclaw.json"))
-}
-
-fn fallback_file_path() -> Result<PathBuf, ConfigError> {
-    let base = BaseDirs::new().ok_or(ConfigError::NoHome)?;
-    Ok(base.config_dir().join("periclaw").join("gateway-token"))
-}
-
-fn try_plaintext_fallback() -> Result<Option<String>, ConfigError> {
-    let path = fallback_file_path()?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&path).map_err(|source| ConfigError::Read {
-        path: path.display().to_string(),
-        source,
-    })?;
-    Ok(Some(raw.trim().to_string()))
-}
-
-fn write_plaintext_fallback(token: &str) -> Result<(), ConfigError> {
-    let path = fallback_file_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, token)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&path)?.permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&path, perms)?;
-    }
-
-    Ok(())
 }
 
 /// Stable per-install UUID, stored beside the token fallback file.

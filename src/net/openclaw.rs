@@ -48,6 +48,7 @@
 //! On any failure the session errors, emits `WsEvent::Disconnected`,
 //! sleeps with exponential backoff capped at 30s, and retries.
 
+use std::pin::Pin;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -109,22 +110,28 @@ fn chrono_now_ms() -> i64 {
 /// route by the event's `sessionKey` instead.
 const CHAT_AGENT_ID: &str = "main";
 
+/// Stable, hashable bundle that [`connect`] takes as its subscription
+/// input. Its `Hash` impl contributes to the subscription identity,
+/// so changing any field (gateway URL, token presence) tears down the
+/// current WS session and starts a fresh one — which is exactly what
+/// we want when the operator updates credentials in the Settings tab.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct ConnectParams {
+    pub gateway_url: String,
+    pub token: Option<String>,
+}
+
 /// Iced subscription stream for the real gateway.
 ///
-/// Keep as a free function (not a closure) — Iced's `Subscription::run`
-/// uses the function pointer as subscription identity.
-pub fn connect() -> impl Stream<Item = WsEvent> {
-    stream::channel(64, async move |mut out| {
-        let Some(gateway_url) = config::gateway_url() else {
-            let msg = "OPENCLAW_GATEWAY_URL is not set. Export it (e.g. \
-                       `export OPENCLAW_GATEWAY_URL=wss://gateway.example/`) \
-                       or run with `--mode mock` for the offline fixture. \
-                       See the README for details.";
-            tracing::error!("{msg}");
-            let _ = out.send(WsEvent::Disconnected(msg.to_string())).await;
-            return;
-        };
-        let token = config::try_load_token();
+/// Called via `Subscription::run_with(params, openclaw::connect)` so
+/// the `params` argument participates in subscription identity. The
+/// return type is a boxed `Pin<Box<dyn Stream + Send>>` (not
+/// `impl Stream`) because `Subscription::run_with` takes a fn pointer
+/// and fn-pointer coercion requires a nameable return type.
+pub fn connect(params: &ConnectParams) -> Pin<Box<dyn Stream<Item = WsEvent> + Send>> {
+    let gateway_url = params.gateway_url.clone();
+    let token = params.token.clone();
+    Box::pin(stream::channel(64, async move |mut out| {
 
         let instance_id = config::instance_id().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "instance-id stash failed; using ephemeral");
@@ -203,7 +210,7 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
             wait_or_command(backoff, &mut cmd_rx).await;
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
-    })
+    }))
 }
 
 /// Map a `ws://` / `wss://` gateway URL onto the matching HTTP origin
