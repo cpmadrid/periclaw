@@ -115,7 +115,15 @@ const CHAT_AGENT_ID: &str = "main";
 /// uses the function pointer as subscription identity.
 pub fn connect() -> impl Stream<Item = WsEvent> {
     stream::channel(64, async move |mut out| {
-        let gateway_url = config::gateway_url();
+        let Some(gateway_url) = config::gateway_url() else {
+            let msg = "OPENCLAW_GATEWAY_URL is not set. Export it (e.g. \
+                       `export OPENCLAW_GATEWAY_URL=wss://gateway.example/`) \
+                       or run with `--mode mock` for the offline fixture. \
+                       See the README for details.";
+            tracing::error!("{msg}");
+            let _ = out.send(WsEvent::Disconnected(msg.to_string())).await;
+            return;
+        };
         let token = config::try_load_token();
 
         let instance_id = config::instance_id().unwrap_or_else(|e| {

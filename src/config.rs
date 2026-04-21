@@ -27,30 +27,19 @@ use serde::Deserialize;
 const KEYRING_SERVICE: &str = "com.sassydog.mission-control-desktop";
 const KEYRING_USER: &str = "openclaw-gateway-token";
 
-// NOT `/__openclaw__/ws` — that's the CANVAS WS path, which intercepts
-// WS upgrades first and runs a different protocol. Gateway WS lives at
-// root, falling through after canvas declines.
-//
-// Default connects through **Tailscale Serve** (`wss://<host>.ts.net/`)
-// rather than the raw IP+port. Tailscale Serve terminates TLS and
-// injects whois headers the gateway trusts when `allowTailscale: true`
-// — so the client doesn't need to hold the gateway's `auth.token` at
-// all. The raw `ws://100.87.202.125:18789/` endpoint bypasses Serve
-// and requires the real token.
-//
-// Override with `OPENCLAW_GATEWAY_URL` if you need the raw endpoint
-// (and have the 48-char `gateway.auth.token` in `OPENCLAW_TOKEN`).
-pub const DEFAULT_GATEWAY_URL: &str = "wss://ubu-3xdv.tail4fb3a4.ts.net/";
-
-/// Resolve the gateway URL at runtime, honoring `OPENCLAW_GATEWAY_URL`.
-pub fn gateway_url() -> String {
-    std::env::var("OPENCLAW_GATEWAY_URL")
-        .ok()
-        .and_then(|s| {
-            let t = s.trim();
-            (!t.is_empty()).then(|| t.to_string())
-        })
-        .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string())
+/// Resolve the gateway URL from `OPENCLAW_GATEWAY_URL`. Returns `None`
+/// when the env var is unset or empty — callers should surface a
+/// helpful error rather than fall back to a hardcoded endpoint.
+///
+/// The WS path is the root (`/`). Do NOT point this at
+/// `/__openclaw__/ws`, which is the canvas WS path (different protocol,
+/// intercepts WS upgrades first). Gateway WS lives at root and falls
+/// through after canvas declines.
+pub fn gateway_url() -> Option<String> {
+    std::env::var("OPENCLAW_GATEWAY_URL").ok().and_then(|s| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
