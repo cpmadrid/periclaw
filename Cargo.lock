@@ -2385,32 +2385,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mission-control-desktop"
-version = "0.1.0"
-dependencies = [
- "base64",
- "directories",
- "ed25519-dalek",
- "futures-util",
- "hex",
- "iced",
- "keyring",
- "notify-rust",
- "palette",
- "rand 0.8.6",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3118,6 +3092,32 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "periclaw"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "directories",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "iced",
+ "keyring",
+ "notify-rust",
+ "palette",
+ "rand 0.8.6",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "phf"
