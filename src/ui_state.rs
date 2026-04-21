@@ -241,7 +241,10 @@ mod tests {
         assert_eq!(w.width, 1440.0);
         assert_eq!(w.height, 900.0);
         assert_eq!(w.position, Some((120.0, 80.0)));
-        assert_eq!(parsed.settings.gateway_url.as_deref(), Some("wss://gw.example/"));
+        assert_eq!(
+            parsed.settings.gateway_url.as_deref(),
+            Some("wss://gw.example/")
+        );
         assert_eq!(parsed.settings.mode.as_deref(), Some("ws"));
     }
 

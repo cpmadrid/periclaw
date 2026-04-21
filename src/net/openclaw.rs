@@ -132,7 +132,6 @@ pub fn connect(params: &ConnectParams) -> Pin<Box<dyn Stream<Item = WsEvent> + S
     let gateway_url = params.gateway_url.clone();
     let token = params.token.clone();
     Box::pin(stream::channel(64, async move |mut out| {
-
         let instance_id = config::instance_id().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "instance-id stash failed; using ephemeral");
             uuid::Uuid::new_v4().to_string()

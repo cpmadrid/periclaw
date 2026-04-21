@@ -993,7 +993,8 @@ impl App {
                 // the ws subscription stays idle instead of trying
                 // to connect to the empty string.
                 let trimmed_url = self.settings_form.gateway_url.trim();
-                self.settings.gateway_url = (!trimmed_url.is_empty()).then(|| trimmed_url.to_string());
+                self.settings.gateway_url =
+                    (!trimmed_url.is_empty()).then(|| trimmed_url.to_string());
                 // Mode `"auto"` doesn't need to be persisted — it's
                 // the default. Only stash a non-default choice so old
                 // state files that predate the setting don't suddenly
@@ -1786,8 +1787,7 @@ impl App {
         // until the operator saves one via the Settings tab.
         let ws = if mock::enabled() {
             Subscription::run(mock::connect).map(Message::Ws)
-        } else if let Some(gateway_url) =
-            config::gateway_url(self.settings.gateway_url.as_deref())
+        } else if let Some(gateway_url) = config::gateway_url(self.settings.gateway_url.as_deref())
         {
             let params = openclaw::ConnectParams {
                 gateway_url,
