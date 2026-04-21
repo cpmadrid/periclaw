@@ -237,7 +237,7 @@ mod tests {
         // mentions ERROR. The "earliest token wins" rule keeps the
         // classification at Info — a plain info-line complaining
         // about a remote failure shouldn't flip the whole line red.
-        let line = "2026-04-19T12:00:00Z  INFO sassy_mc::net: got ERROR from peer";
+        let line = "2026-04-19T12:00:00Z  INFO periclaw::net: got ERROR from peer";
         assert_eq!(parse_severity(line), LogSeverity::Info);
     }
 
@@ -268,7 +268,7 @@ mod tests {
         // Any level mention past the first 80 bytes is simply not
         // scanned — this is the safety net for really verbose
         // prefixes (e.g. deeply-nested module paths).
-        let line = format!("{}  INFO sassy_mc::net: real content", "x".repeat(80),);
+        let line = format!("{}  INFO periclaw::net: real content", "x".repeat(80),);
         assert_eq!(parse_severity(&line), LogSeverity::Info);
     }
 

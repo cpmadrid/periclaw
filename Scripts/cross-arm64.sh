@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Cross-compile for ubu-3xdv (aarch64-unknown-linux-gnu).
+# Cross-compile for aarch64-unknown-linux-gnu.
 # Uses `cross` if available; falls back to native cargo with the
 # target flag (requires the toolchain + linker).
 # Invoked via `./dev cross-arm64`.

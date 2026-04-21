@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 
-# Mission Control Desktop — Developer Convenience Script
+# Periclaw — Developer Convenience Script
 # Thin router; activity implementations live in Scripts/.
-# Mirrors the pattern used by apps across Sassy Dog (lupita, velovate,
-# tailoredtip, quickshot, brewslate).
 #
 # Usage: ./dev <activity> [options]
 
@@ -15,7 +13,7 @@ source "${DEV_SCRIPT_DIR}/Scripts/lib.sh"
 
 show_help() {
     cat << 'EOF'
-Mission Control Desktop — Developer Convenience Script
+Periclaw — Developer Convenience Script
 
 USAGE:
     ./dev <activity> [options]
@@ -28,7 +26,7 @@ ACTIVITIES:
     lint (l)                 cargo clippy --all-targets -- -D warnings
     fmt (f)                  cargo fmt (add --check for dry-run)
     ci                       Full CI pipeline (fmt-check, clippy, test, release build)
-    cross-arm64              Cross-compile for ubu-3xdv (aarch64-linux-gnu)
+    cross-arm64              Cross-compile for aarch64-unknown-linux-gnu
     clean                    cargo clean
     version (v)              Print app version, build number, git sha
     help (h, -h, --help)     Show this help
@@ -58,7 +56,7 @@ FMT OPTIONS:
     --check                  cargo fmt --all --check (doesn't modify)
 
 GENERAL:
-    --verbose                Verbose logging (RUST_LOG=sassy_mc=trace)
+    --verbose                Verbose logging (RUST_LOG=periclaw=trace)
     --quiet                  Minimal logging (RUST_LOG=warn)
 
 EXAMPLES:
@@ -71,7 +69,7 @@ EXAMPLES:
     ./dev build --release                   # stripped release binary
     ./dev test                              # cargo test
     ./dev ci                                # everything CI runs
-    ./dev cross-arm64                       # build for ubu-3xdv
+    ./dev cross-arm64                       # cross-compile for aarch64-linux-gnu
     ./dev fmt --check                       # format check without writing
 
 EOF
@@ -144,7 +142,7 @@ fi
 # other crates stay at warn so we don't drown in iced/winit/wgpu chatter.
 # Respect an existing RUST_LOG env var — it's a power-user override.
 if [[ -z "${RUST_LOG:-}" ]]; then
-    RUST_LOG="sassy_mc=${LOG_LEVEL},warn"
+    RUST_LOG="periclaw=${LOG_LEVEL},warn"
 fi
 export RUST_LOG
 

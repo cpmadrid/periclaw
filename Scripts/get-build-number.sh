@@ -2,7 +2,6 @@
 
 # Get Build Number — returns a monotonic build number for the app.
 # Priority: $BUILD_NUMBER env var > git commit count.
-# Mirrors lupita/Scripts/get-build-number.sh so CI and local stay aligned.
 
 set -euo pipefail
 

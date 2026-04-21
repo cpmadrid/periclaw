@@ -15,14 +15,13 @@ MODE="${MODE:-auto}"        # auto | mock | ws
 NO_BUILD="${NO_BUILD:-false}"
 LOG_TARGETS="${LOG_TARGETS:-console}"   # console | file | both
 LOG_FILE="${LOG_FILE:-}"                # empty → auto-generate under Logs/
-RUST_LOG_DEFAULT="${RUST_LOG_DEFAULT:-sassy_mc=debug,warn}"
+RUST_LOG_DEFAULT="${RUST_LOG_DEFAULT:-periclaw=debug,warn}"
 export RUST_LOG="${RUST_LOG:-$RUST_LOG_DEFAULT}"
 
 require_bin cargo "Install Rust from https://rustup.rs"
 
-# Secrets come from Doppler (sassy-dog standard). If the user already has
-# OPENCLAW_TOKEN exported, respect it; otherwise prepend `doppler run --`
-# so the app inherits secrets from the monorepo's doppler config.
+# If the user already has OPENCLAW_TOKEN exported, respect it; otherwise
+# prepend `doppler run --` so the app inherits secrets from doppler.
 # Doppler is opt-in: if it's not installed or not configured for this
 # repo, we fall through silently and the app's built-in token bootstrap
 # (keychain → plaintext fallback → ~/.openclaw/openclaw.json) takes over.

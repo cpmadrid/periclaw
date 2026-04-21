@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Common Library Functions — Mission Control Desktop
+# Common Library Functions — Periclaw
 # Sourced by ./dev and the activity scripts in Scripts/.
 # Keep this a thin wrapper; activity-specific logic belongs in its own script.
 
@@ -16,7 +16,7 @@ cd_to_project_root() {
     cd "$PROJECT_ROOT" || exit 1
 }
 
-# Colored output — matches lupita's print_* palette.
+# Colored output.
 print_info()    { echo -e "${BLUE}${INFO}${NC}  $1"; }
 print_success() { echo -e "${GREEN}${SUCCESS}${NC} $1"; }
 print_error()   { echo -e "${RED}${ERROR}${NC} $1" >&2; }

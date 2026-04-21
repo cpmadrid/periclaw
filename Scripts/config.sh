@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 
-# Application Configuration — Mission Control Desktop
-# Mirrors the pattern used by lupita/Scripts/config.sh.
+# Application Configuration — Periclaw
 
 # App information
-APP_NAME="Mission Control Desktop"
-APP_EXECUTABLE="sassy-mc"
-APP_CRATE="mission-control-desktop"
+APP_NAME="Periclaw"
+APP_EXECUTABLE="periclaw"
+APP_CRATE="periclaw"
 
 # Version — single source of truth is Cargo.toml.
 # Read it lazily so bumping Cargo.toml is all you need.
@@ -34,7 +33,7 @@ BUILD_DIR="target"
 DEBUG_BUILD_DIR="${BUILD_DIR}/debug"
 RELEASE_BUILD_DIR="${BUILD_DIR}/release"
 
-# Colors for output — match lupita's palette
+# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

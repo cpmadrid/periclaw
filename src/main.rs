@@ -17,7 +17,7 @@ fn main() -> iced::Result {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "sassy_mc=info,warn".into()),
+                .unwrap_or_else(|_| "periclaw=info,warn".into()),
         )
         .init();
 
@@ -28,7 +28,7 @@ fn main() -> iced::Result {
         .install_default()
         .expect("install rustls ring crypto provider");
 
-    tracing::info!("starting Mission Control Desktop");
+    tracing::info!("starting Periclaw");
 
     // Pull persisted UI state before the window opens so restored
     // dimensions apply on first paint, not after a visible resize.
