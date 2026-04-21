@@ -3103,6 +3103,7 @@ dependencies = [
  "futures-util",
  "hex",
  "iced",
+ "image",
  "keyring",
  "notify-rust",
  "palette",

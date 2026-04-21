@@ -41,6 +41,9 @@ thiserror = "2"
 # Windows talks to WinRT. Default features pull `z` (zbus) which is
 # what we want for the Linux wall-display path.
 notify-rust = "4"
+# PNG decode for the window/dock icon. `iced::window::icon::from_rgba`
+# only accepts raw RGBA bytes, so we decode `logo.png` at startup.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
 lto = "thin"

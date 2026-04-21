@@ -55,7 +55,23 @@ fn main() -> iced::Result {
     .window(iced::window::Settings {
         size: window_size,
         position: window_position,
+        icon: load_window_icon(),
         ..Default::default()
     })
     .run()
+}
+
+/// Decode the embedded `logo.png` into the RGBA buffer Iced needs.
+/// Returns `None` (the default) if decoding fails — the app should
+/// still launch with the platform's stock icon rather than panic.
+fn load_window_icon() -> Option<iced::window::Icon> {
+    const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
+    let img = image::load_from_memory_with_format(LOGO_PNG, image::ImageFormat::Png)
+        .inspect_err(|e| tracing::warn!(error = %e, "window icon decode failed"))
+        .ok()?
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    iced::window::icon::from_rgba(img.into_raw(), w, h)
+        .inspect_err(|e| tracing::warn!(error = %e, "window icon build failed"))
+        .ok()
 }
