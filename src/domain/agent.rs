@@ -2,7 +2,7 @@
 //!
 //! Only the `main` agent is seeded at startup; cron and channel entries
 //! are populated live from the gateway's `cron.list` / `channels.status`
-//! snapshots so renames or additions on ubu-3xdv surface immediately.
+//! snapshots so renames or additions on the gateway surface immediately.
 
 use iced::Color;
 
@@ -102,9 +102,9 @@ pub fn seed_roster() -> Vec<Agent> {
 
 /// Collapse boilerplate prefixes/suffixes off long cron names so the
 /// display label stays readable under the sprite. Examples:
-///   `teamapp-velovate-sync-hourly` → `velovate-sync-hourly`
-///   `openclaw-auto-update`         → `auto-update`
-///   `zpool-health-check`           → `zpool-health-check`
+///   `teamapp-data-sync-hourly` → `data-sync-hourly`
+///   `openclaw-auto-update`     → `auto-update`
+///   `zpool-health-check`       → `zpool-health-check`
 fn shorten_for_display(id: &str) -> String {
     const PREFIXES: &[&str] = &["teamapp-", "openclaw-"];
     let mut s = id;

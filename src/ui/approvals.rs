@@ -53,8 +53,8 @@ pub fn scope_upgrade_notice(request_id: &str) -> Element<'_, Message> {
         text("Scope upgrade pending").size(12).color(*theme::MUTED),
         text(
             "The gateway has filed a pair-request to grant this \
-             desktop approvals permission. Run this on ubu-3xdv, \
-             then click Retry now:",
+             desktop approvals permission. Run this on the gateway \
+             host, then click Retry now:",
         )
         .size(12)
         .color(*theme::FOREGROUND),

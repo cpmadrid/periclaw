@@ -1,4 +1,4 @@
-//! Real WebSocket client for the OpenClaw gateway on ubu-3xdv.
+//! Real WebSocket client for the OpenClaw gateway.
 //!
 //! Drives the UI from **push events**, not polling. The gateway already
 //! broadcasts a rich set of scope-free events (`cron`, `chat`, `agent`,
@@ -206,6 +206,25 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
     })
 }
 
+/// Map a `ws://` / `wss://` gateway URL onto the matching HTTP origin
+/// (`http://` / `https://`, scheme + authority). Returns `None` for
+/// URLs that aren't WebSocket — the caller falls back to letting the
+/// gateway reject the handshake rather than sending a garbage Origin.
+fn derive_origin(ws_url: &str) -> Option<String> {
+    let (scheme, rest) = if let Some(r) = ws_url.strip_prefix("wss://") {
+        ("https", r)
+    } else if let Some(r) = ws_url.strip_prefix("ws://") {
+        ("http", r)
+    } else {
+        return None;
+    };
+    let authority = rest.split_once('/').map(|(a, _)| a).unwrap_or(rest);
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}"))
+}
+
 #[derive(Debug, thiserror::Error)]
 enum SessionError {
     #[error("connect {0}")]
@@ -255,13 +274,14 @@ async fn session(
             .map_err(|e| SessionError::Send(e.to_string()))?;
         req.headers_mut().insert("Authorization", auth_header);
     }
-    // Gateway enforces `controlUi.allowedOrigins` on WS upgrade. Use
-    // one of the configured origins — the Control UI's own dashboard
-    // origin satisfies this for either endpoint.
-    req.headers_mut().insert(
-        "Origin",
-        HeaderValue::from_static("https://ubu-3xdv.tail4fb3a4.ts.net"),
-    );
+    // Gateway enforces `controlUi.allowedOrigins` on WS upgrade.
+    // Derive the Origin from the gateway URL itself so the user's
+    // allowedOrigins only needs to list the gateway's own hostname.
+    if let Some(origin) = derive_origin(gateway_url) {
+        let origin_header = HeaderValue::from_str(&origin)
+            .map_err(|e| SessionError::Send(format!("invalid origin: {e}")))?;
+        req.headers_mut().insert("Origin", origin_header);
+    }
     let (mut socket, _resp) = connect_async(req).await?;
 
     // Step 1: wait for the server-initiated `connect.challenge` event before

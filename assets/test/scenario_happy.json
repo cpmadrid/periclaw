@@ -7,8 +7,8 @@
       "crons": [
         { "name": "zpool-health-check",           "state": { "lastStatus": "ok",    "running": false } },
         { "name": "openclaw-auto-update",         "state": { "lastStatus": "ok",    "running": false } },
-        { "name": "teamapp-velovate-sync-hourly", "state": { "lastStatus": "ok",    "running": false } },
-        { "name": "velovate-weekly-digest",       "state": { "lastStatus": "ok",    "running": false } }
+        { "name": "example-data-sync-hourly", "state": { "lastStatus": "ok",    "running": false } },
+        { "name": "example-weekly-digest",       "state": { "lastStatus": "ok",    "running": false } }
       ],
       "channels": [
         { "name": "slack",    "enabled": true, "connected": true },
@@ -22,8 +22,8 @@
       "crons": [
         { "name": "zpool-health-check",           "state": { "lastStatus": "ok",    "running": false } },
         { "name": "openclaw-auto-update",         "state": { "lastStatus": "ok",    "running": false } },
-        { "name": "teamapp-velovate-sync-hourly", "state": { "lastStatus": "ok",    "running": true  } },
-        { "name": "velovate-weekly-digest",       "state": { "lastStatus": "ok",    "running": false } }
+        { "name": "example-data-sync-hourly", "state": { "lastStatus": "ok",    "running": true  } },
+        { "name": "example-weekly-digest",       "state": { "lastStatus": "ok",    "running": false } }
       ],
       "channels": [
         { "name": "slack",    "enabled": true, "connected": true },
@@ -37,8 +37,8 @@
       "crons": [
         { "name": "zpool-health-check",           "state": { "lastStatus": "ok",    "running": false } },
         { "name": "openclaw-auto-update",         "state": { "lastStatus": "error", "running": false, "lastError": "network timeout" } },
-        { "name": "teamapp-velovate-sync-hourly", "state": { "lastStatus": "ok",    "running": false } },
-        { "name": "velovate-weekly-digest",       "state": { "lastStatus": "ok",    "running": false } }
+        { "name": "example-data-sync-hourly", "state": { "lastStatus": "ok",    "running": false } },
+        { "name": "example-weekly-digest",       "state": { "lastStatus": "ok",    "running": false } }
       ],
       "channels": [
         { "name": "slack",    "enabled": true, "connected": true },
@@ -52,8 +52,8 @@
       "crons": [
         { "name": "zpool-health-check",           "state": { "lastStatus": "ok",    "running": true  } },
         { "name": "openclaw-auto-update",         "state": { "lastStatus": "ok",    "running": false } },
-        { "name": "teamapp-velovate-sync-hourly", "state": { "lastStatus": "ok",    "running": false } },
-        { "name": "velovate-weekly-digest",       "state": { "lastStatus": "ok",    "running": true  } }
+        { "name": "example-data-sync-hourly", "state": { "lastStatus": "ok",    "running": false } },
+        { "name": "example-weekly-digest",       "state": { "lastStatus": "ok",    "running": true  } }
       ],
       "channels": [
         { "name": "slack",    "enabled": true, "connected": true },
@@ -67,8 +67,8 @@
       "crons": [
         { "name": "zpool-health-check",           "state": { "lastStatus": "ok",    "running": false } },
         { "name": "openclaw-auto-update",         "state": { "lastStatus": "ok",    "running": false } },
-        { "name": "teamapp-velovate-sync-hourly", "state": { "lastStatus": "ok",    "running": false } },
-        { "name": "velovate-weekly-digest",       "state": { "lastStatus": "ok",    "running": false } }
+        { "name": "example-data-sync-hourly", "state": { "lastStatus": "ok",    "running": false } },
+        { "name": "example-weekly-digest",       "state": { "lastStatus": "ok",    "running": false } }
       ],
       "channels": [
         { "name": "slack",    "enabled": true, "connected": true },

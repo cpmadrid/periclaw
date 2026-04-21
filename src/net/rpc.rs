@@ -305,7 +305,7 @@ mod tests {
     fn parses_cron_status_fixture() {
         let json = r#"
         {
-            "name": "teamapp-velovate-sync-hourly",
+            "name": "example-data-sync-hourly",
             "state": {
                 "nextRunAtMs": 1776441517517,
                 "lastRunAtMs": 1776427117517,
@@ -317,7 +317,7 @@ mod tests {
         }
         "#;
         let cron: CronJob = serde_json::from_str(json).unwrap();
-        assert_eq!(cron.name, "teamapp-velovate-sync-hourly");
+        assert_eq!(cron.name, "example-data-sync-hourly");
         assert_eq!(cron.state.last_status.as_deref(), Some("ok"));
         assert!(!cron.state.running);
     }

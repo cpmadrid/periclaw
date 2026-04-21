@@ -67,8 +67,8 @@ pub fn room_for(id: &AgentId, kind: AgentKind, status: AgentStatus) -> RoomId {
             // Each cron's idle "home" — thematic association
             ("zpool-health-check", _) => RoomId::Observatory,
             ("openclaw-auto-update", _) => RoomId::ResearchLab,
-            ("teamapp-velovate-sync-hourly", _) => RoomId::MemoryVault,
-            ("velovate-weekly-digest", _) => RoomId::Studio,
+            ("example-data-sync-hourly", _) => RoomId::MemoryVault,
+            ("example-weekly-digest", _) => RoomId::Studio,
             // Unknown cron: fall back to Research Lab
             _ => RoomId::ResearchLab,
         },
@@ -117,8 +117,8 @@ mod tests {
         let crons = [
             "zpool-health-check",
             "openclaw-auto-update",
-            "teamapp-velovate-sync-hourly",
-            "velovate-weekly-digest",
+            "example-data-sync-hourly",
+            "example-weekly-digest",
         ];
         for name in crons {
             assert_eq!(
@@ -133,8 +133,8 @@ mod tests {
         let cases = [
             ("zpool-health-check", RoomId::Observatory),
             ("openclaw-auto-update", RoomId::ResearchLab),
-            ("teamapp-velovate-sync-hourly", RoomId::MemoryVault),
-            ("velovate-weekly-digest", RoomId::Studio),
+            ("example-data-sync-hourly", RoomId::MemoryVault),
+            ("example-weekly-digest", RoomId::Studio),
         ];
         for (name, expected) in cases {
             assert_eq!(

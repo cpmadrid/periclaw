@@ -1784,10 +1784,10 @@ mod bubble_cleanup_tests {
 
     #[test]
     fn strips_code_fences_and_joins_lines() {
-        let input = "```\nLinux ubu-3xdv 6.8.0-110-generic\nx86_64 GNU/Linux\n```";
+        let input = "```\nLinux host 6.8.0-110-generic\nx86_64 GNU/Linux\n```";
         assert_eq!(
             clean_bubble_text(input, 80),
-            "Linux ubu-3xdv 6.8.0-110-generic x86_64 GNU/Linux"
+            "Linux host 6.8.0-110-generic x86_64 GNU/Linux"
         );
     }
 
