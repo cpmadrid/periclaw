@@ -4,8 +4,8 @@
 //! Loaded once at startup (before the Iced application runs, so the
 //! initial window can be sized to the saved dimensions) and re-saved
 //! whenever the operator changes one of the tracked values. Lives at
-//! `$XDG_CONFIG_HOME/sassy-dog/desktop-state.json` (macOS: under
-//! `~/Library/Application Support/sassy-dog/`) alongside the gateway
+//! `$XDG_CONFIG_HOME/periclaw/desktop-state.json` (macOS: under
+//! `~/Library/Application Support/periclaw/`) alongside the gateway
 //! token file.
 //!
 //! Corrupt or unreadable → log at `warn` and fall back to `Default`.
@@ -125,7 +125,7 @@ pub fn save(state: &UiState) {
 
 fn state_path() -> Option<PathBuf> {
     let base = BaseDirs::new()?;
-    Some(base.config_dir().join("sassy-dog").join(STATE_FILE))
+    Some(base.config_dir().join("periclaw").join(STATE_FILE))
 }
 
 pub fn nav_from_str(s: &str) -> Option<NavItem> {

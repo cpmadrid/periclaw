@@ -16,7 +16,7 @@
 //! ## Storage
 //!
 //! Private key: 32-byte Ed25519 signing seed, base64url-encoded.
-//! Stored in **both** `$XDG_CONFIG_HOME/sassy-dog/device-key` (mode
+//! Stored in **both** `$XDG_CONFIG_HOME/periclaw/device-key` (mode
 //! 0600) and the OS keychain. Load path checks the file **first** so
 //! `cargo run` re-signs of this binary don't trigger a macOS keychain
 //! access prompt every launch — and more importantly, a dismissed
@@ -34,7 +34,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-const KEYRING_SERVICE: &str = "com.sassydog.mission-control-desktop";
+const KEYRING_SERVICE: &str = "com.cpmadrid.periclaw";
 const KEYRING_USER: &str = "openclaw-device-key";
 
 #[derive(Debug, thiserror::Error)]
@@ -231,7 +231,7 @@ fn persist_plaintext_fallback(key: &SigningKey) -> Result<(), IdentityError> {
 
 fn fallback_path() -> Result<std::path::PathBuf, IdentityError> {
     let base = directories::BaseDirs::new().ok_or(IdentityError::NoHome)?;
-    Ok(base.config_dir().join("sassy-dog").join("device-key"))
+    Ok(base.config_dir().join("periclaw").join("device-key"))
 }
 
 fn decode_signing_key(seed_b64url: &str) -> Result<SigningKey, IdentityError> {

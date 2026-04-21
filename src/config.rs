@@ -1,9 +1,9 @@
 //! Token bootstrap and config paths.
 //!
 //! **Lookup order** (first hit wins):
-//! 1. `OPENCLAW_TOKEN` env var — the Doppler-injected source of truth
-//!    in this project; when present we never fall through.
-//! 2. Plaintext fallback file at `$XDG_CONFIG_HOME/sassy-dog/gateway-token`
+//! 1. `OPENCLAW_TOKEN` env var — the preferred source of truth;
+//!    when present we never fall through.
+//! 2. Plaintext fallback file at `$XDG_CONFIG_HOME/periclaw/gateway-token`
 //!    (mode 0600).
 //! 3. OS keychain — only a read path, kept for backward-compat with
 //!    installs that stashed here under older builds.
@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use directories::{BaseDirs, UserDirs};
 use serde::Deserialize;
 
-const KEYRING_SERVICE: &str = "com.sassydog.mission-control-desktop";
+const KEYRING_SERVICE: &str = "com.cpmadrid.periclaw";
 const KEYRING_USER: &str = "openclaw-gateway-token";
 
 /// Resolve the gateway URL from `OPENCLAW_GATEWAY_URL`. Returns `None`
@@ -63,7 +63,7 @@ pub enum ConfigError {
 }
 
 /// Try to load a gateway token. Returns `None` when no token is
-/// available — that's the Tailscale-Serve-only case, where the gateway
+/// available — that's the Tailscale-Serve case, where the gateway
 /// authenticates the connection via Tailscale whois headers and a
 /// client-side token would only interfere (it flips the gateway into
 /// token-comparison mode; see `openclaw/src/gateway/auth.ts:577`).
@@ -71,7 +71,7 @@ pub fn try_load_token() -> Option<String> {
     match load_token() {
         Ok(tok) => Some(tok),
         Err(e) => {
-            tracing::debug!(error = %e, "no gateway token; relying on Tailscale auth");
+            tracing::debug!(error = %e, "no gateway token; relying on ambient auth");
             None
         }
     }
@@ -84,10 +84,10 @@ pub fn load_token() -> Result<String, ConfigError> {
     if let Ok(tok) = std::env::var("OPENCLAW_TOKEN") {
         let tok = tok.trim().to_string();
         if !tok.is_empty() {
-            // Env var is the Doppler-injected source of truth — use
-            // it directly. No stash: writing to the keychain here
-            // triggers a login-password prompt on every dev launch
-            // because the binary signature changes with each build.
+            // Env var is the preferred source — use it directly. No
+            // stash: writing to the keychain here triggers a
+            // login-password prompt on every dev launch because the
+            // binary signature changes with each build.
             tracing::debug!("OPENCLAW_TOKEN env var provided");
             return Ok(tok);
         }
@@ -160,7 +160,7 @@ fn openclaw_config_path() -> Result<PathBuf, ConfigError> {
 
 fn fallback_file_path() -> Result<PathBuf, ConfigError> {
     let base = BaseDirs::new().ok_or(ConfigError::NoHome)?;
-    Ok(base.config_dir().join("sassy-dog").join("gateway-token"))
+    Ok(base.config_dir().join("periclaw").join("gateway-token"))
 }
 
 fn try_plaintext_fallback() -> Result<Option<String>, ConfigError> {
@@ -198,7 +198,7 @@ fn write_plaintext_fallback(token: &str) -> Result<(), ConfigError> {
 /// server can distinguish restarts of the same install from a new one.
 pub fn instance_id() -> Result<String, ConfigError> {
     let base = BaseDirs::new().ok_or(ConfigError::NoHome)?;
-    let dir = base.config_dir().join("sassy-dog");
+    let dir = base.config_dir().join("periclaw");
     fs::create_dir_all(&dir)?;
     let path = dir.join("instance-id");
 
