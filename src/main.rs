@@ -29,6 +29,23 @@ fn main() -> iced::Result {
         .install_default()
         .expect("install rustls ring crypto provider");
 
+    // On macOS, `mac-notification-sys` (via `notify-rust`) looks up
+    // the calling app's bundle identifier on its first send. A
+    // `cargo run` / unsigned binary has no bundle, so the library
+    // falls back to the literal string `"use_default"`, which
+    // LaunchServices then tries to resolve as an app name — popping
+    // a "Choose Application" dialog asking the operator where
+    // `use_default` lives. Short-circuit by naming a bundle we know
+    // exists. Notifications appear attributed to Terminal until we
+    // ship a signed `.app` with our own bundle id.
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = notify_rust::get_bundle_identifier_or_default("Terminal");
+        if let Err(e) = notify_rust::set_application(&bundle) {
+            tracing::debug!(error = %e, "set_application failed; notifications may prompt");
+        }
+    }
+
     tracing::info!("starting Periclaw");
 
     // Pull persisted UI state before the window opens so restored

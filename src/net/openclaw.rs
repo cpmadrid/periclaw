@@ -92,7 +92,15 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// approve command. 5 minutes is comfortably longer than the
 /// "copy, ssh in, paste" round-trip; the operator can also just
 /// relaunch the desktop to force an immediate retry once approved.
-const SCOPE_UPGRADE_BACKOFF: Duration = Duration::from_secs(300);
+/// Interval between silent retries while a pair-request is pending
+/// (first-pair OR scope-upgrade). Short enough that `openclaw devices
+/// approve …` on the gateway host reflects in the desktop within the
+/// operator's "approve-and-glance" window; long enough that the
+/// gateway's audit log isn't spammed with attempts. Was 5 minutes
+/// until the UX feedback came back as "too long to notice I'd
+/// approved"; retry manually via the Retry-now button still works
+/// and short-circuits this wait via the command channel.
+const SCOPE_UPGRADE_BACKOFF: Duration = Duration::from_secs(15);
 
 /// Milliseconds since the UNIX epoch — the format `signedAtMs` in
 /// the device-auth payload expects. Falls back to zero if the system
