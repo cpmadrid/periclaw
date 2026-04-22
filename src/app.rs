@@ -1880,16 +1880,20 @@ impl App {
         // CPU on a quiet scene:
         // - 33 ms while anything is actively moving (bob, flash,
         //   thought bubble fading) — fluid at ~30fps.
-        // - 200 ms when sprites are just idle-cycling walk frames
-        //   (Main + Cron alternate at 0.6–1 Hz). A 5fps refresh is
-        //   plenty to show the frame change without a visible stutter.
+        // - 50 ms while sprites are idle-cycling frames (the lobster
+        //   IDLE loop at 3 Hz × 7 frames). An earlier 200 ms interval
+        //   produced a visible beat pattern: phase advances 0.6
+        //   frames per tick, so some frames rendered twice while
+        //   neighbours rendered once, reading as stutter rather
+        //   than smooth animation. 50 ms × 3 Hz = 0.15 frames/tick,
+        //   which samples the cycle finely enough to read smooth.
         // - 500 ms when the scene is truly static (all disabled or
         //   all Channels, which don't cycle frames).
         let now = Instant::now();
         let tick_interval = if !self.bubbles.is_empty() || self.any_sprite_animating(now) {
             Duration::from_millis(33)
         } else if self.any_sprite_idle_cycling() {
-            Duration::from_millis(200)
+            Duration::from_millis(50)
         } else {
             Duration::from_millis(500)
         };

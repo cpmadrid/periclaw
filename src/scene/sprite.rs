@@ -254,24 +254,38 @@ pub fn draw_lobster(
     };
     let handle = frames[idx].clone();
 
+    // Pin the bounds origin to integer pixels before handing them
+    // to iced. Without this, sub-pixel positions (from wander /
+    // bob offsets, both float sines) would feed into the image
+    // renderer, and even at `FilterMethod::Nearest` the GPU picks
+    // subtly different source texels each frame — visible flicker
+    // along the sprite's edges. Belt-and-suspenders with the
+    // `snap(true)` flag below.
     let bounds = Rectangle::new(
         Point::new(
-            center.x - LOBSTER_SIZE.width / 2.0,
-            center.y - LOBSTER_SIZE.height / 2.0,
+            (center.x - LOBSTER_SIZE.width / 2.0).round(),
+            (center.y - LOBSTER_SIZE.height / 2.0).round(),
         ),
         LOBSTER_SIZE,
     );
-    let image = iced_image::Image::new(handle).filter_method(iced_image::FilterMethod::Nearest);
+    // `snap(true)` asks the renderer to align the image to the
+    // pixel grid at draw time — iced docs explicitly recommend it
+    // for Nearest-filtered sprites to avoid graphical glitches.
+    let image = iced_image::Image::new(handle)
+        .filter_method(iced_image::FilterMethod::Nearest)
+        .snap(true);
 
     if flip_h {
         // Horizontal mirror: translate to sprite center, scale X by
         // -1, translate back, then draw. `with_save` auto-restores
         // the transform on close so subsequent sprites aren't
-        // double-flipped.
+        // double-flipped. The translate amount is rounded so the
+        // flipped origin still lands on the pixel grid.
+        let flip_pivot = center.x.round();
         frame.with_save(|f| {
-            f.translate(Vector::new(center.x, 0.0));
+            f.translate(Vector::new(flip_pivot, 0.0));
             f.scale_nonuniform(Vector::new(-1.0, 1.0));
-            f.translate(Vector::new(-center.x, 0.0));
+            f.translate(Vector::new(-flip_pivot, 0.0));
             f.draw_image(bounds, image);
         });
     } else {
