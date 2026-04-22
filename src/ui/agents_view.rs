@@ -1,5 +1,5 @@
 //! The "Agents" nav tab — a scrollable card list that gives each
-//! agent a full row of detail the Overview sprite can't surface:
+//! agent and job a full row of detail the Overview sprite can't surface:
 //!
 //! - crons: schedule-adjacent metadata (`nextRunAtMs`, `lastRunAtMs`,
 //!   duration, last error) + "Run now" button
@@ -19,53 +19,55 @@ use iced::widget::{Space, button, column, container, row, scrollable, text};
 use iced::{Alignment, Border, Element, Length, Padding};
 
 use crate::Message;
-use crate::domain::{Agent, AgentId, AgentKind, AgentStatus};
+use crate::domain::job::JobKind;
+use crate::domain::{Agent, AgentId, AgentStatus, Job, JobId};
 use crate::net::rpc::{Channel, CronState, SessionInfo};
 use crate::ui::theme;
+use crate::ui::widgets::{card_style, colored_dot, status_pill};
 
 pub struct AgentsViewSnapshot<'a> {
     pub roster: &'a [Agent],
+    pub jobs: &'a HashMap<JobId, Job>,
     pub statuses: &'a HashMap<AgentId, AgentStatus>,
     pub cron_details: &'a HashMap<AgentId, CronState>,
     /// UUIDs keyed by AgentId for crons that came from the snapshot.
-    /// Used to gate the "Run" button — if we don't know the id we
-    /// can't fire `cron.run`, so the button stays hidden.
     pub cron_ids: &'a HashMap<AgentId, String>,
     pub channel_details: &'a HashMap<AgentId, Channel>,
     pub active_model: Option<&'a str>,
     pub sessions: &'a HashMap<String, SessionInfo>,
-    /// Main agents whose Reset button is armed — the row renders
-    /// the button in red "Confirm reset?" form instead of the neutral
-    /// "Reset session". Absence means the neutral form is shown.
     pub pending_resets: &'a HashMap<AgentId, Instant>,
-    /// Agent ids whose error row is expanded (full text shown
-    /// instead of truncated). Toggled by `Message::ToggleAgentError`.
     pub expanded_errors: &'a std::collections::HashSet<AgentId>,
 }
 
-/// Detail lines split so the caller can render the `error` row
-/// differently (expandable toggle, red color, wrap) from the
-/// neutral schedule / session lines.
 struct AgentDetail {
     lines: Vec<String>,
     error: Option<String>,
 }
 
 pub fn view<'a>(snap: AgentsViewSnapshot<'a>) -> Element<'a, Message> {
-    let rows = snap
+    let agent_rows = snap
         .roster
         .iter()
         .map(|agent| agent_row(agent, &snap))
         .fold(column![].spacing(10), |acc, el| acc.push(el));
 
+    let mut jobs_sorted: Vec<&Job> = snap.jobs.values().collect();
+    jobs_sorted.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    let job_rows = jobs_sorted
+        .into_iter()
+        .map(|job| job_row(job, &snap))
+        .fold(column![].spacing(10), |acc, el| acc.push(el));
+
     let header = text("Agents").size(20).color(*theme::FOREGROUND);
+    let tracked = snap.roster.len() + snap.jobs.len();
 
     let body = column![
         header,
-        text(format!("{} tracked", snap.roster.len()))
+        text(format!("{tracked} tracked"))
             .size(12)
             .color(*theme::MUTED),
-        rows,
+        agent_rows,
+        job_rows,
     ]
     .spacing(14)
     .padding(Padding::from(24));
@@ -82,84 +84,84 @@ fn agent_row<'a>(agent: &'a Agent, snap: &AgentsViewSnapshot<'a>) -> Element<'a,
         .get(&agent.id)
         .copied()
         .unwrap_or(AgentStatus::Unknown);
-    let (badge_label, badge_color) = status_badge(status);
 
-    // Colored sprite dot
-    let dot = container(text(""))
-        .width(Length::Fixed(10.0))
-        .height(Length::Fixed(10.0))
-        .style(move |_| container::Style {
-            background: Some(agent.color().into()),
-            border: Border {
-                color: agent.color(),
-                width: 0.0,
-                radius: 5.0.into(),
-            },
-            ..Default::default()
-        });
+    let dot = colored_dot(agent.color());
+    let badge = status_pill(status);
+    let action: Option<Element<'a, Message>> = Some(reset_session_button(
+        agent.id.clone(),
+        snap.pending_resets.contains_key(&agent.id),
+    ));
 
-    // Status badge
-    let badge = container(text(badge_label).size(10).color(badge_color))
-        .padding(Padding::from([2, 6]))
-        .style(move |_| container::Style {
-            background: Some(
-                iced::Color {
-                    a: 0.15,
-                    ..badge_color
-                }
-                .into(),
-            ),
-            border: Border {
-                color: iced::Color {
-                    a: 0.45,
-                    ..badge_color
-                },
-                width: 1.0,
-                radius: 3.0.into(),
-            },
-            ..Default::default()
-        });
-
-    // Per-kind action button — rendered in the header's right gutter
-    // before the status badge. Keeps a single affordance per row so
-    // the card stays scannable.
-    let action_button: Option<Element<'a, Message>> = match agent.kind {
-        AgentKind::Cron if snap.cron_ids.contains_key(&agent.id) => Some(
-            button(text("Run now").size(11))
-                .padding(Padding::from([4, 10]))
-                .on_press(Message::RunCron(agent.id.clone()))
-                .into(),
-        ),
-        AgentKind::Main => Some(reset_session_button(
-            agent.id.clone(),
-            snap.pending_resets.contains_key(&agent.id),
-        )),
-        _ => None,
-    };
-
+    let kind_label = "agent";
     let mut header = row![
         dot,
         text(agent.display.as_str())
             .size(14)
             .color(*theme::FOREGROUND),
-        text(format!("{:?}", agent.kind).to_lowercase())
-            .size(11)
-            .color(*theme::MUTED),
+        text(kind_label).size(11).color(*theme::MUTED),
         Space::new().width(Length::Fill),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
-    if let Some(btn) = action_button {
+    if let Some(btn) = action {
         header = header.push(btn);
     }
     header = header.push(badge);
 
-    let detail = match agent.kind {
-        AgentKind::Cron => cron_detail(&agent.id, snap),
-        AgentKind::Channel => channel_detail(&agent.id, snap),
-        AgentKind::Main => main_detail(snap),
+    let detail = main_detail(snap);
+
+    card(&agent.id, header, detail, snap.expanded_errors)
+}
+
+fn job_row<'a>(job: &'a Job, snap: &AgentsViewSnapshot<'a>) -> Element<'a, Message> {
+    let status = job.status;
+    let dot = colored_dot(job.color());
+    let badge = status_pill(status);
+
+    let agent_id = AgentId::new(job.id.as_str());
+    let action: Option<Element<'a, Message>> = match job.kind {
+        JobKind::Cron if snap.cron_ids.contains_key(&agent_id) => Some(
+            button(text("Run now").size(11))
+                .padding(Padding::from([4, 10]))
+                .on_press(Message::RunCron(agent_id.clone()))
+                .into(),
+        ),
+        _ => None,
     };
 
+    let kind_label = match job.kind {
+        JobKind::Cron => "cron",
+        JobKind::Channel => "channel",
+    };
+    let mut header = row![
+        dot,
+        text(job.display.as_str())
+            .size(14)
+            .color(*theme::FOREGROUND),
+        text(kind_label).size(11).color(*theme::MUTED),
+        Space::new().width(Length::Fill),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    if let Some(btn) = action {
+        header = header.push(btn);
+    }
+    header = header.push(badge);
+
+    let detail = match job.kind {
+        JobKind::Cron => cron_detail(&agent_id, snap),
+        JobKind::Channel => channel_detail(&agent_id, snap),
+    };
+
+    card(&agent_id, header, detail, snap.expanded_errors)
+}
+
+fn card<'a>(
+    row_id: &AgentId,
+    header: iced::widget::Row<'a, Message>,
+    detail: AgentDetail,
+    expanded_errors: &std::collections::HashSet<AgentId>,
+) -> Element<'a, Message> {
     let mut detail_col = detail
         .lines
         .into_iter()
@@ -167,22 +169,14 @@ fn agent_row<'a>(agent: &'a Agent, snap: &AgentsViewSnapshot<'a>) -> Element<'a,
             acc.push(text(line).size(11).color(*theme::MUTED))
         });
     if let Some(err) = detail.error {
-        let expanded = snap.expanded_errors.contains(&agent.id);
-        detail_col = detail_col.push(error_row(agent.id.clone(), err, expanded));
+        let expanded = expanded_errors.contains(row_id);
+        detail_col = detail_col.push(error_row(row_id.clone(), err, expanded));
     }
 
     container(column![header, detail_col].spacing(8))
         .width(Length::Fill)
         .padding(Padding::from([12, 14]))
-        .style(|_| container::Style {
-            background: Some((*theme::SURFACE_1).into()),
-            border: Border {
-                color: *theme::BORDER,
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            ..Default::default()
-        })
+        .style(card_style(6.0))
         .into()
 }
 
@@ -253,10 +247,6 @@ fn main_detail<'a>(snap: &AgentsViewSnapshot<'a>) -> AgentDetail {
     AgentDetail { lines, error: None }
 }
 
-/// Expandable error row — truncated one-liner by default, click the
-/// chevron (▸/▾) to swap in the full text. Uses the app's
-/// `expanded_errors` set as the source of truth; toggle dispatches
-/// a Message that updates the set and re-renders.
 fn error_row(agent_id: AgentId, err: String, expanded: bool) -> Element<'static, Message> {
     let indicator = if expanded { "▾" } else { "▸" };
     let body = if expanded {
@@ -300,10 +290,6 @@ fn error_row(agent_id: AgentId, err: String, expanded: bool) -> Element<'static,
     .into()
 }
 
-/// "Reset session" button with two-click confirmation. The armed
-/// state is driven by the app's `pending_resets` map — flipping
-/// between states is handled by the `ResetMainSession` handler in
-/// `app.rs`, not by local widget state.
 fn reset_session_button(agent_id: AgentId, armed: bool) -> Element<'static, Message> {
     let (label, fg, bg, border) = if armed {
         (
@@ -339,16 +325,6 @@ fn reset_session_button(agent_id: AgentId, armed: bool) -> Element<'static, Mess
         .into()
 }
 
-fn status_badge(status: AgentStatus) -> (&'static str, iced::Color) {
-    match status {
-        AgentStatus::Running => ("RUNNING", *theme::TERMINAL_GREEN),
-        AgentStatus::Ok => ("OK", *theme::STATUS_UP),
-        AgentStatus::Error => ("ERROR", *theme::STATUS_DOWN),
-        AgentStatus::Disabled => ("OFF", *theme::MUTED),
-        AgentStatus::Unknown => ("?", *theme::STATUS_UNKNOWN),
-    }
-}
-
 fn yes_no(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
 }
@@ -367,13 +343,10 @@ fn format_duration_ms(ms: i64) -> String {
     }
 }
 
-/// Show a Unix-ms timestamp as `Ns ago` / `Nm ago` / `Nh ago` /
-/// `Nd ago` / `never` (clock-skew or missing).
 fn format_time_ago(ms: i64) -> String {
     let Some(d) = duration_from_now_to(ms) else {
         return "never".into();
     };
-    // Past: d is positive; future handled by format_time_until.
     if d.as_secs() < 60 {
         format!("({}s ago)", d.as_secs())
     } else if d.as_secs() < 3600 {
