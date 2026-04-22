@@ -135,7 +135,7 @@ fn gateway_url_section<'a>(form: &'a SettingsForm) -> Element<'a, Message> {
 /// freezing on the first failure — that's information the operator
 /// wants during debugging.
 fn connection_status_row<'a>(status: &'a ConnectionStatus) -> Element<'a, Message> {
-    let (label, color) = match status {
+    let (body, color) = match status {
         ConnectionStatus::Untested => (
             "(not tested — click Save to try)".to_string(),
             *theme::MUTED,
@@ -144,12 +144,16 @@ fn connection_status_row<'a>(status: &'a ConnectionStatus) -> Element<'a, Messag
         ConnectionStatus::Ok => ("✓ connected".to_string(), *theme::STATUS_UP),
         ConnectionStatus::Failed(reason) => (format!("✗ {reason}"), *theme::STATUS_DOWN),
     };
-    row![
-        text("Connection status:").size(11).color(*theme::MUTED),
-        text(label).size(11).color(color),
+    // Stack the label above the body instead of sitting inline with
+    // it. Inline `row` kept the message on one line and squeezed the
+    // layout when the gateway returned a verbose error; stacking
+    // gives the body full width to wrap into, which `text`'s default
+    // wrapping handles automatically.
+    column![
+        text("Connection status").size(11).color(*theme::MUTED),
+        text(body).size(12).color(color).width(Length::Fill),
     ]
-    .spacing(6)
-    .align_y(Alignment::Center)
+    .spacing(4)
     .into()
 }
 

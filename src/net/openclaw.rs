@@ -204,8 +204,13 @@ pub fn connect(params: &ConnectParams) -> Pin<Box<dyn Stream<Item = WsEvent> + S
                     continue;
                 }
                 Err(e) => {
+                    // Log the raw error (JSON payloads and all) for
+                    // post-hoc debugging; the UI gets the humanized
+                    // summary so the Settings tab doesn't render a
+                    // wall of protocol internals.
                     tracing::warn!(error = %e, "session errored; reconnecting");
-                    let _ = out.send(WsEvent::Disconnected(e.to_string())).await;
+                    let reason = humanize_disconnect_reason(&e.to_string());
+                    let _ = out.send(WsEvent::Disconnected(reason)).await;
                 }
             }
 
@@ -213,6 +218,61 @@ pub fn connect(params: &ConnectParams) -> Pin<Box<dyn Stream<Item = WsEvent> + S
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     }))
+}
+
+/// Collapse a raw `SessionError::Display` string into something
+/// operator-friendly for the Settings tab's status line and the
+/// status-bar's disconnect readout.
+///
+/// The gateway's `handshake rejected: {json…}` form is the big
+/// offender — the full `error.message` + structured details dumped
+/// verbatim looks like a stack trace. We parse the JSON payload and
+/// surface just the human message, preferring the envelope's
+/// `error.message` over the nested `details.code`. Other error
+/// shapes ("connect IO error: …", tungstenite handshake failures)
+/// are already short-ish; we trim and pass them through.
+///
+/// Raw payloads remain available in the Logs tab (the ingest path
+/// at line 207 logs the unprocessed error via `tracing::warn!`
+/// before this function runs).
+fn humanize_disconnect_reason(raw: &str) -> String {
+    // The `HandshakeRejected(String)` variant's Display prepends
+    // "handshake rejected: " to the payload; everything after is
+    // usually a JSON envelope from the gateway.
+    if let Some(json) = raw.strip_prefix("handshake rejected: ")
+        && let Ok(value) = serde_json::from_str::<Value>(json)
+    {
+        let message = value
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str);
+        let detail_code = value
+            .get("error")
+            .and_then(|e| e.get("details"))
+            .and_then(|d| d.get("code"))
+            .and_then(Value::as_str);
+        return match (message, detail_code) {
+            (Some(m), Some(code)) => format!("gateway rejected: {m} [{code}]"),
+            (Some(m), None) => format!("gateway rejected: {m}"),
+            (None, Some(code)) => format!("gateway rejected ({code})"),
+            (None, None) => "gateway rejected the handshake".to_string(),
+        };
+    }
+
+    // Otherwise the raw string is already short-ish ("connect IO
+    // error: Connection refused (os error 61)", "handshake timeout",
+    // etc.). Cap the length as a defensive measure so a weird future
+    // error shape can't blow out the status line's layout.
+    const MAX_LEN: usize = 200;
+    if raw.len() <= MAX_LEN {
+        raw.to_string()
+    } else {
+        let mut cut = MAX_LEN.saturating_sub(1);
+        while cut > 0 && !raw.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…", &raw[..cut])
+    }
 }
 
 /// Map a `ws://` / `wss://` gateway URL onto the matching HTTP origin
@@ -1693,6 +1753,48 @@ mod command_rpc_tests {
         assert_eq!(agent_id_from_session_key("main"), None);
         assert_eq!(agent_id_from_session_key("agent::main"), None);
         assert_eq!(agent_id_from_session_key("agent:onlyid"), None);
+    }
+
+    #[test]
+    fn humanizer_parses_handshake_rejection_payload() {
+        // Shape emitted by the gateway on auth rate-limit — the exact
+        // string that was flooding the Settings tab before the humanizer.
+        let raw = r#"handshake rejected: {"type":"res","id":"connect-1","ok":false,"error":{"code":"INVALID_REQUEST","message":"unauthorized: too many failed authentication attempts (retry later)","details":{"code":"AUTH_RATE_LIMITED","authReason":"rate_limited"}}}"#;
+        let out = humanize_disconnect_reason(raw);
+        assert_eq!(
+            out,
+            "gateway rejected: unauthorized: too many failed authentication attempts (retry later) [AUTH_RATE_LIMITED]",
+        );
+    }
+
+    #[test]
+    fn humanizer_falls_through_for_non_json_errors() {
+        // IO errors already read cleanly enough; pass through unchanged.
+        let raw = "connect IO error: Connection refused (os error 61)";
+        assert_eq!(humanize_disconnect_reason(raw), raw);
+    }
+
+    #[test]
+    fn humanizer_caps_arbitrarily_long_strings() {
+        // Defensive: a future error format with an enormous payload
+        // mustn't blow out the status line's layout. Cap is MAX_LEN
+        // (200) content chars plus a trailing ellipsis; UTF-8 ellipsis
+        // is 3 bytes, so the byte length lands at ~202.
+        let raw = "x".repeat(500);
+        let out = humanize_disconnect_reason(&raw);
+        assert!(out.len() < 210, "got {} bytes", out.len());
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn humanizer_handles_rejected_payload_missing_message() {
+        // If the gateway ever sends a rejection with only a code and
+        // no message, we still produce something readable.
+        let raw = r#"handshake rejected: {"error":{"details":{"code":"UNKNOWN_CLIENT"}}}"#;
+        assert_eq!(
+            humanize_disconnect_reason(raw),
+            "gateway rejected (UNKNOWN_CLIENT)",
+        );
     }
 
     #[test]
