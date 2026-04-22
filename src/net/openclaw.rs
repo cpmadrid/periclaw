@@ -112,13 +112,16 @@ const CHAT_AGENT_ID: &str = "main";
 
 /// Stable, hashable bundle that [`connect`] takes as its subscription
 /// input. Its `Hash` impl contributes to the subscription identity,
-/// so changing any field (gateway URL, token presence) tears down the
-/// current WS session and starts a fresh one — which is exactly what
-/// we want when the operator updates credentials in the Settings tab.
+/// so changing any field tears down the current WS session and
+/// starts a fresh one. `save_nonce` is bumped on every Settings Save
+/// so re-saving unchanged values still restarts the subscription —
+/// otherwise the operator gets no feedback when they click Save on
+/// values that were already correct.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ConnectParams {
     pub gateway_url: String,
     pub token: Option<String>,
+    pub save_nonce: u64,
 }
 
 /// Iced subscription stream for the real gateway.

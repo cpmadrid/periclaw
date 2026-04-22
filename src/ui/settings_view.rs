@@ -22,7 +22,7 @@ use iced::widget::{Space, button, column, container, radio, row, text, text_inpu
 use iced::{Alignment, Border, Element, Length, Padding};
 
 use crate::Message;
-use crate::app::SettingsForm;
+use crate::app::{ConnectionStatus, SettingsForm};
 use crate::ui::theme;
 use crate::ui_state::Settings;
 
@@ -38,6 +38,11 @@ pub struct Snapshot<'a> {
     /// the token input so the operator can see *where* their secret
     /// actually lives under the current build flavor.
     pub storage_location: &'static str,
+    /// Result of the most recent connection attempt. Drives the
+    /// status line under the Gateway URL field so the operator gets
+    /// live feedback on Save instead of having to infer from the
+    /// status bar whether their settings actually work.
+    pub connection_status: &'a ConnectionStatus,
 }
 
 pub fn view<'a>(snap: Snapshot<'a>) -> Element<'a, Message> {
@@ -61,6 +66,7 @@ pub fn view<'a>(snap: Snapshot<'a>) -> Element<'a, Message> {
     }
 
     body = body.push(gateway_url_section(snap.form));
+    body = body.push(connection_status_row(snap.connection_status));
     body = body.push(mode_section(snap.form));
     body = body.push(token_section(
         snap.form,
@@ -118,6 +124,32 @@ fn gateway_url_section<'a>(form: &'a SettingsForm) -> Element<'a, Message> {
         field,
     ]
     .spacing(6)
+    .into()
+}
+
+/// Status line rendered right under the Gateway URL field. Reads the
+/// latest connect-attempt outcome: `(not tested)` before any save
+/// this session, `⟳ connecting…` immediately after save, `✓ connected`
+/// on success, `✗ <reason>` on failure. A reconnect loop on a bad
+/// URL will cycle between connecting and failed honestly rather than
+/// freezing on the first failure — that's information the operator
+/// wants during debugging.
+fn connection_status_row<'a>(status: &'a ConnectionStatus) -> Element<'a, Message> {
+    let (label, color) = match status {
+        ConnectionStatus::Untested => (
+            "(not tested — click Save to try)".to_string(),
+            *theme::MUTED,
+        ),
+        ConnectionStatus::Connecting => ("⟳ connecting…".to_string(), *theme::MUTED),
+        ConnectionStatus::Ok => ("✓ connected".to_string(), *theme::STATUS_UP),
+        ConnectionStatus::Failed(reason) => (format!("✗ {reason}"), *theme::STATUS_DOWN),
+    };
+    row![
+        text("Connection status:").size(11).color(*theme::MUTED),
+        text(label).size(11).color(color),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
     .into()
 }
 

@@ -342,6 +342,39 @@ pub struct App {
     /// because the gateway's Tailscale-auth path runs without a
     /// token at all.
     cached_token: Option<String>,
+    /// Result of the most recent connect attempt, surfaced in the
+    /// Settings tab so the operator gets feedback after Save
+    /// without having to check the status bar. Drives the "status"
+    /// line under the Gateway URL field.
+    pub connection_status: ConnectionStatus,
+    /// Bumps every time the operator clicks Save. Participates in
+    /// `ConnectParams`' `Hash` so the ws subscription identity
+    /// changes even when URL + token are unchanged — otherwise a
+    /// Save with identical values would be a silent no-op and the
+    /// operator would never see fresh "connecting / connected"
+    /// feedback.
+    save_nonce: u64,
+}
+
+/// Current connect attempt's outcome, shown in the Settings tab. A
+/// reconnect loop on a bad URL cycles between `Connecting` and
+/// `Failed` — the field reflects the latest event honestly rather
+/// than freezing on the first failure.
+#[derive(Debug, Clone, Default)]
+pub enum ConnectionStatus {
+    /// No Save this session, no attempt yet. View reads this as
+    /// "(not tested)".
+    #[default]
+    Untested,
+    /// WS subscription is alive and trying to establish a session.
+    Connecting,
+    /// Handshake succeeded and events are flowing.
+    Ok,
+    /// Latest attempt landed on `WsEvent::Disconnected(reason)`.
+    /// Carries the reason string so the operator can see what
+    /// went wrong (connection refused, TLS error, handshake
+    /// rejection, etc.).
+    Failed(String),
 }
 
 /// Ephemeral Settings-tab form state. Not persisted — it mirrors
@@ -522,9 +555,20 @@ impl App {
             pending_window: state.window,
             pending_window_since: None,
             settings_form: SettingsForm::from_settings(&state.settings),
+            // Status reflects what the ws subscription will actually
+            // do in `fn subscription`: no URL → stays Untested; URL
+            // configured → enters Connecting immediately so the
+            // Settings view doesn't flash "(not tested)" for a split
+            // second before the first WsEvent lands.
+            connection_status: if first_run_incomplete || mock::enabled() {
+                ConnectionStatus::Untested
+            } else {
+                ConnectionStatus::Connecting
+            },
             settings: state.settings,
             token_present: secret_store::has_token(),
             cached_token: config::try_load_token(),
+            save_nonce: 0,
         }
     }
 
@@ -1022,6 +1066,16 @@ impl App {
                         self.cached_token = config::try_load_token();
                     }
                 }
+                // Bump the nonce and mark status `Connecting` so the
+                // Settings view shows fresh feedback even when the
+                // operator re-saved the same URL/token (which
+                // wouldn't otherwise change the subscription identity).
+                self.save_nonce = self.save_nonce.wrapping_add(1);
+                self.connection_status = if self.first_run_incomplete() {
+                    ConnectionStatus::Untested
+                } else {
+                    ConnectionStatus::Connecting
+                };
                 Task::none()
             }
             Message::SettingsClearToken => {
@@ -1102,11 +1156,13 @@ impl App {
             WsEvent::Connected => {
                 self.connected = true;
                 self.last_disconnect = None;
+                self.connection_status = ConnectionStatus::Ok;
                 tracing::info!("WS connected");
             }
             WsEvent::Disconnected(reason) => {
                 self.connected = false;
                 self.last_disconnect = Some(reason.clone());
+                self.connection_status = ConnectionStatus::Failed(reason.clone());
                 // Reset the "hydrated this connection" set so the
                 // next successful connect re-pulls chat.history as
                 // the operator touches each agent. Logs themselves
@@ -1680,6 +1736,7 @@ impl App {
                 first_run_incomplete: self.first_run_incomplete(),
                 token_present: self.token_present,
                 storage_location: secret_store::storage_location_hint(),
+                connection_status: &self.connection_status,
             }),
         };
 
@@ -1792,6 +1849,7 @@ impl App {
             let params = openclaw::ConnectParams {
                 gateway_url,
                 token: self.cached_token.clone(),
+                save_nonce: self.save_nonce,
             };
             // Explicit fn-pointer cast — `openclaw::connect` returns
             // `impl Stream`, which is a fn-item not a fn-pointer, and
