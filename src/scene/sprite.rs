@@ -276,6 +276,10 @@ pub fn sprite_size_px(sprite: &Sprite, scale: f32) -> Size {
 /// the draw function itself is stateless so the caller owns the
 /// clock — Running agents pass a higher `frame_hz`, idle ones pass
 /// a slower one, and fully-static sprites pass `0.0`.
+///
+/// `flip_h` mirrors the frame horizontally — a lobster facing left
+/// on its way back across the room without needing a second set of
+/// frames.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_sprite_pixels(
     frame: &mut canvas::Frame,
@@ -286,6 +290,7 @@ pub fn draw_sprite_pixels(
     intensity: f32,
     seconds: f32,
     frame_hz: f32,
+    flip_h: bool,
 ) {
     let width = sprite.width() as f32 * scale;
     let height = sprite.height() as f32 * scale;
@@ -300,6 +305,7 @@ pub fn draw_sprite_pixels(
     let outline = with_alpha(*theme::SURFACE_0, alpha);
 
     let rows = sprite.frame(seconds, frame_hz);
+    let sprite_w = sprite.width();
     for (row_idx, row) in rows.iter().enumerate() {
         for (col_idx, ch) in row.chars().enumerate() {
             let color = match ch {
@@ -310,12 +316,19 @@ pub fn draw_sprite_pixels(
                 _ => None,
             };
             let Some(color) = color else { continue };
+            // Mirror column index when flipping so the sprite faces
+            // the opposite direction without an alternate frame.
+            let draw_col = if flip_h {
+                sprite_w.saturating_sub(1).saturating_sub(col_idx)
+            } else {
+                col_idx
+            };
             // Draw each cell as a solid rectangle. Nearest-neighbor
             // comes for free with axis-aligned rects at integer-ish
             // positions — no filtering, no sub-pixel smear.
             let cell = canvas::Path::rectangle(
                 Point::new(
-                    origin.x + col_idx as f32 * scale,
+                    origin.x + draw_col as f32 * scale,
                     origin.y + row_idx as f32 * scale,
                 ),
                 Size::new(scale, scale),

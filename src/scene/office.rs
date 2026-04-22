@@ -66,8 +66,10 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
             }
 
             let now = Instant::now();
+            let seconds = clock_phase(now);
             let mut sprite_positions: HashMap<AgentId, Point> = HashMap::new();
             for (room, agents) in per_room {
+                let room_rect = layout.room_rect(room);
                 for (idx, agent) in agents.iter().enumerate() {
                     let base_pos = layout.sprite_slot(room, idx);
                     let status = self
@@ -80,12 +82,18 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                         .get(&agent.id)
                         .map(|t| transition_flash(now.saturating_duration_since(*t)))
                         .unwrap_or(0.0);
-                    let pos = animated_position(base_pos, status, now);
-                    let seconds = clock_phase(now);
-                    draw_sprite(frame, pos, agent, status, flash, seconds);
-                    // Bubble anchor stays on the static slot so the
-                    // tail doesn't whip around with the bob.
-                    sprite_positions.insert(agent.id.clone(), base_pos);
+                    // Ok/Unknown agents slow-wander around their home
+                    // slot. Running adds a vertical bob on top of the
+                    // base position (stays where they're working).
+                    // Errored/Disabled stay anchored to their slot.
+                    let (wander, facing_left) = wander_offset(&agent.id, &room_rect, seconds, status);
+                    let wander_pos = Point::new(base_pos.x + wander.x, base_pos.y + wander.y);
+                    let pos = animated_position(wander_pos, status, now);
+                    draw_sprite(frame, pos, agent, status, flash, seconds, facing_left);
+                    // Bubble anchor stays on the wander-adjusted
+                    // position but not the bob — the tail shouldn't
+                    // whip around while the sprite's bouncing.
+                    sprite_positions.insert(agent.id.clone(), wander_pos);
                 }
             }
 
@@ -152,6 +160,7 @@ fn draw_room(frame: &mut canvas::Frame, layout: &RoomLayout, room: RoomId) {
             0.75,
             0.0,
             0.0,
+            false,
         );
     }
 }
@@ -206,6 +215,7 @@ fn draw_bubble(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_sprite(
     frame: &mut canvas::Frame,
     pos: Point,
@@ -213,6 +223,7 @@ fn draw_sprite(
     status: AgentStatus,
     flash: f32,
     seconds: f32,
+    flip_h: bool,
 ) {
     use crate::scene::sprite::{self, DEFAULT_SCALE};
 
@@ -273,6 +284,7 @@ fn draw_sprite(
         intensity,
         seconds,
         frame_hz,
+        flip_h,
     );
 
     // Channels get a scrolling scanline on the "screen" region of
@@ -307,6 +319,57 @@ fn draw_sprite(
         font: iced::Font::MONOSPACE,
         ..Text::default()
     });
+}
+
+/// Slow wander pattern — each agent drifts within a soft bounding
+/// box around its home slot via two orthogonal sines at slightly
+/// different periods, keyed by a hash of the agent id so siblings
+/// don't move in lockstep. Disabled and Errored agents stay still
+/// (they shouldn't look like they're idling around); Running stays
+/// put too (they're "working at their station" and the bob reads
+/// as busy). Only Ok / Unknown wander.
+///
+/// Returns the (x, y) offset from base plus a `facing_left` flag
+/// derived from the horizontal-velocity sign so the sprite flips
+/// when moving right-to-left.
+fn wander_offset(
+    agent_id: &AgentId,
+    room_rect: &Rectangle,
+    seconds: f32,
+    status: AgentStatus,
+) -> (Point, bool) {
+    if !matches!(status, AgentStatus::Ok | AgentStatus::Unknown) {
+        return (Point::ORIGIN, false);
+    }
+    // Keep wander bounds comfortably inside the room so sprites
+    // don't clip the border. `amp_x` caps around a third of the
+    // half-width; `amp_y` is tighter so sprites stay in the lower
+    // half where the slots already sit.
+    let amp_x = (room_rect.width * 0.18).clamp(8.0, 60.0);
+    let amp_y = (room_rect.height * 0.08).clamp(4.0, 24.0);
+
+    // Stable hash of the id — spreads sprites' phase offsets so
+    // two lobsters in the same room don't sine-wave in unison.
+    let mut h: u64 = 5381;
+    for b in agent_id.as_str().bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    let phase_x = (h % 360) as f32 * std::f32::consts::PI / 180.0;
+    let phase_y = ((h / 7) % 360) as f32 * std::f32::consts::PI / 180.0;
+    // Speed ∈ [0.10, 0.28] rad/sec — intentionally slow. Different
+    // per-agent so the office reads as organic rather than a clock
+    // tick.
+    let speed = 0.10 + ((h % 40) as f32 * 0.0045);
+
+    let t = seconds * speed;
+    let offset_x = (t + phase_x).sin() * amp_x;
+    // Y moves slower and with a different period so the path
+    // traces a wandering Lissajous rather than a straight diagonal.
+    let offset_y = (t * 0.73 + phase_y).cos() * amp_y;
+    // Facing: the horizontal velocity at this instant. Cosine of
+    // the x-phase is the derivative's sign.
+    let facing_left = (t + phase_x).cos() < 0.0;
+    (Point::new(offset_x, offset_y), facing_left)
 }
 
 /// Running sprites bob subtly to mark them as busy. Other states
