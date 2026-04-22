@@ -2,3 +2,6 @@ target/
 Logs/
 .DS_Store
 *.swp
+
+# cargo-bundle output (regenerated on every `./dev run`)
+bundle/

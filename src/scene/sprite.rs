@@ -19,10 +19,13 @@
 //! small (≤ 16 cells per side) so nothing crushes under the office
 //! layout's available per-slot area.
 
-use iced::widget::canvas;
-use iced::{Color, Point, Size};
+use std::sync::LazyLock;
 
-use crate::domain::{Agent, AgentKind};
+use iced::advanced::image as iced_image;
+use iced::widget::canvas;
+use iced::{Color, Point, Rectangle, Size};
+
+use crate::domain::AgentStatus;
 use crate::ui::theme;
 
 /// One animated sprite — 1+ frames of equal dimensions. A single-
@@ -134,93 +137,339 @@ pub const MICROPHONE: Sprite = Sprite {
     ]],
 };
 
-/// Classic Pac-Man ghost — dome with wavy bottom, big friendly eyes.
-/// Two frames: the wavy bottom pattern shifts by one cell between
-/// frames, so cycling them reads as the ghost "floating" across the
-/// floor. Used for cron agents; the hue comes from each cron's
-/// ghost-palette pick so five running crons look like a ghost posse.
-pub const GHOST: Sprite = Sprite {
-    frames: &[
-        &[
-            "....XXXXXX....",
-            "..XXXXXXXXXX..",
-            ".XXXXXXXXXXXX.",
-            ".XXWWXXXXWWXX.",
-            "XXXWKXXXXWKXXX",
-            "XXXWWXXXXWWXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XX.XX.XX.XX.XX",
-            "X...X...X...X.",
-        ],
-        &[
-            "....XXXXXX....",
-            "..XXXXXXXXXX..",
-            ".XXXXXXXXXXXX.",
-            ".XXWWXXXXWWXX.",
-            "XXXWKXXXXWKXXX",
-            "XXXWWXXXXWWXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            ".XX.XX.XX.XX.X",
-            "X...X...X...X.",
-        ],
-    ],
+// =====================================================================
+// Space Lobster sprite — image-based.
+//
+// The pixel-art char-grid approach worked for decor but didn't have
+// the fidelity for the mascot. The lobster now loads from a bundled
+// PNG sprite sheet that the operator can swap / re-theme per release.
+//
+// Frames live at `assets/lobster/{idle,walk}-{0..3}.png` — four each
+// for IDLE and WALK. They're embedded with `include_bytes!` so a
+// release binary remains a single file (no asset-path resolution at
+// runtime). Decoded once via `LazyLock` — Iced caches the GPU
+// texture by `Handle` identity, so cloning the Handle on every frame
+// redraw is cheap.
+//
+// Rendering goes through `draw_lobster` (canvas image + nearest-
+// neighbor filter) instead of `draw_sprite_pixels` (per-cell rect
+// fill). The two paths coexist: decor and MONITOR still use the
+// char-grid renderer; lobsters use image.
+// =====================================================================
+
+/// Decode a PNG at runtime and return a Handle built from raw RGBA.
+/// Going through `image` + `from_rgba` (instead of `from_bytes`) lets
+/// us mirror pixel data in RAM before handing it to iced — that's how
+/// the flipped-handle arrays are built without relying on the canvas
+/// transform stack. Panics on malformed input, which is fine: the
+/// PNGs are baked in via `include_bytes!`, so a decode failure means
+/// a broken checkout, not a runtime error path.
+fn decode_rgba(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    let img = image::load_from_memory(bytes)
+        .expect("embedded lobster PNG decodes")
+        .to_rgba8();
+    let (w, h) = img.dimensions();
+    (w, h, img.into_raw())
+}
+
+/// Mirror RGBA pixels left-right in place. Why bake a second handle
+/// instead of flipping at draw time: iced 0.14's canvas image path
+/// does not honor a `scale_nonuniform(-1, 1)` on the transform stack
+/// reliably — the negative X scale flips the quad's winding and the
+/// backend ends up rendering the texture inverted on Y (the upside-
+/// down lobsters). Pre-flipping in RAM produces an identical-size
+/// RGBA buffer with columns reversed; drawing it with an unmodified
+/// transform stack renders as a clean horizontal mirror, no matter
+/// what the backend does with negative scales.
+fn mirror_horizontal(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let stride = w * 4;
+    let mut out = vec![0u8; rgba.len()];
+    for y in 0..h {
+        let row_start = y * stride;
+        for x in 0..w {
+            let src = row_start + (w - 1 - x) * 4;
+            let dst = row_start + x * 4;
+            out[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+        }
+    }
+    out
+}
+
+/// Construct the unflipped + flipped handle pair for one PNG.
+fn lobster_handle_pair(bytes: &[u8]) -> (iced_image::Handle, iced_image::Handle) {
+    let (w, h, rgba) = decode_rgba(bytes);
+    let flipped_rgba = mirror_horizontal(w, h, &rgba);
+    (
+        iced_image::Handle::from_rgba(w, h, rgba),
+        iced_image::Handle::from_rgba(w, h, flipped_rgba),
+    )
+}
+
+/// Paired (unflipped, flipped) handle arrays for one pose set. We
+/// store them as a tuple inside a single LazyLock so each PNG is
+/// decoded exactly once at first use and the two handle arrays stay
+/// in lockstep (frame i unflipped and frame i flipped come from the
+/// same raw RGBA buffer).
+type IdleHandles = ([iced_image::Handle; 7], [iced_image::Handle; 7]);
+type WalkHandles = ([iced_image::Handle; 8], [iced_image::Handle; 8]);
+
+static LOBSTER_IDLE_HANDLES: LazyLock<IdleHandles> = LazyLock::new(|| {
+    let p0 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-0.png"));
+    let p1 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-1.png"));
+    let p2 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-2.png"));
+    let p3 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-3.png"));
+    let p4 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-4.png"));
+    let p5 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-5.png"));
+    let p6 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-6.png"));
+    (
+        [p0.0, p1.0, p2.0, p3.0, p4.0, p5.0, p6.0],
+        [p0.1, p1.1, p2.1, p3.1, p4.1, p5.1, p6.1],
+    )
+});
+
+static LOBSTER_WALK_HANDLES: LazyLock<WalkHandles> = LazyLock::new(|| {
+    let p0 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-0.png"));
+    let p1 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-1.png"));
+    let p2 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-2.png"));
+    let p3 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-3.png"));
+    let p4 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-4.png"));
+    let p5 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-5.png"));
+    let p6 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-6.png"));
+    let p7 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-7.png"));
+    (
+        [p0.0, p1.0, p2.0, p3.0, p4.0, p5.0, p6.0, p7.0],
+        [p0.1, p1.1, p2.1, p3.1, p4.1, p5.1, p6.1, p7.1],
+    )
+});
+
+/// Target render size. Deliberately set to **exactly half** the
+/// source resolution (140/2, 170/2) so the downsample is a clean
+/// 2× nearest-neighbor reduction — every target pixel samples a
+/// fixed 2×2 block of source texels, identically on every frame.
+///
+/// Why the exact integer ratio matters: at an arbitrary ratio like
+/// 66/140 ≈ 0.471, `FilterMethod::Nearest` picks a different source
+/// texel whenever the target rect's origin shifts by a fraction
+/// of a pixel (wander offset, bob, etc.). Even with `snap(true)`
+/// on the Image, the edges of the sprite shimmer because the
+/// "which-texel-wins" decision is sensitive to sub-pixel rect
+/// placement. At an integer scale factor the decision is fixed —
+/// adjacent target pixels always sample adjacent 2×2 source blocks
+/// with no interpolation ambiguity, no matter where the rect
+/// lands. Flicker goes away.
+///
+/// Must remain `LOBSTER_SOURCE / 2.0` if the source ever changes
+/// size; enforced by the `lobster_size_matches_source_scale` test.
+pub const LOBSTER_SIZE: Size = Size {
+    width: 70.0,
+    height: 85.0,
 };
 
-/// Rounded humanoid — a head + body figure. Two frames:
-/// - frame 0: legs even, arms relaxed
-/// - frame 1: legs staggered, arms slightly bent — reads as a step
-///
-/// Used for `Main` (chat-capable) agents; the primary color is the
-/// agent's signature hue so Sebastian reads as a bright-green
-/// terminal figure, other personas in their own shade.
-pub const HUMANOID: Sprite = Sprite {
-    frames: &[
-        &[
-            "....XXXXXX....",
-            "...XXXXXXXX...",
-            "..XXXWKXXWKXX.",
-            "..XXXWWXXWWXX.",
-            "..XXXXXXXXXXX.",
-            "...XXXXXXXXX..",
-            "....XXXXXXX...",
-            "..XXXXXXXXXXX.",
-            ".XXXXXXXXXXXXX",
-            "XXxxXXXXXXxxXX",
-            "XXxxXXXXXXxxXX",
-            ".xxxXXXXXXxxx.",
-            "....XXXXXX....",
-            "...XX....XX...",
-            "...XX....XX...",
-            "..xxx....xxx..",
-        ],
-        &[
-            "....XXXXXX....",
-            "...XXXXXXXX...",
-            "..XXXWKXXWKXX.",
-            "..XXXWWXXWWXX.",
-            "..XXXXXXXXXXX.",
-            "...XXXXXXXXX..",
-            "....XXXXXXX...",
-            "..XXXXXXXXXXX.",
-            "XXXXXXXXXXXXXX",
-            "Xxxx.XXXXxxxx.",
-            "Xxxx.XXXXxxxx.",
-            ".xxx.XXXX.xxx.",
-            "....XXXXXX....",
-            "...XX....XX...",
-            "...XX.....XX..",
-            "..xxx.....xxx.",
-        ],
-    ],
+/// Native size of each PNG frame. All 15 frames were padded to this
+/// canvas during extraction. Used when converting per-frame anchor
+/// offsets (measured in source pixels) to draw-space pixels.
+pub const LOBSTER_SOURCE: Size = Size {
+    width: 140.0,
+    height: 170.0,
 };
+
+/// Per-frame body anchors inside the 140×170 source canvas. Centroid
+/// alone wasn't enough to prevent flicker — a walking lobster with
+/// an extended claw has its centroid pulled off the body midline, so
+/// centroid-centered rendering made the body silhouette appear to
+/// hop between poses. These anchors are tuned so each frame's
+/// visible body midline lands at the same canvas point regardless
+/// of where the claws / legs happen to be.
+///
+/// Seed values come from measuring the body band's x-midpoint in
+/// each PNG; can be nudged by ±1 using the `PERICLAW_SPRITE_DEBUG=1`
+/// overlay without a recompile cycle needed per tweak (the overlay
+/// makes the mismatch visible; edit here, rebuild, re-check).
+const LOBSTER_IDLE_ANCHORS: [(f32, f32); 7] = [
+    (70.0, 85.0),
+    (70.0, 85.0),
+    (71.0, 85.0),
+    (70.0, 85.0),
+    (71.0, 85.0),
+    (70.0, 85.0),
+    (70.0, 85.0),
+];
+const LOBSTER_WALK_ANCHORS: [(f32, f32); 8] = [
+    (73.0, 85.0),
+    (74.0, 85.0),
+    (74.0, 85.0),
+    (75.0, 85.0),
+    (75.0, 85.0),
+    (76.0, 85.0),
+    (73.0, 85.0),
+    (70.0, 85.0),
+];
+
+/// Set `PERICLAW_SPRITE_DEBUG=1` in the env to enable a debug overlay:
+/// per-sprite crosshair at `center`, wireframe of the draw bounds,
+/// current frame index + phase underneath, and a static reference
+/// lobster in the top-left of the scene running its walk cycle
+/// without any of the wander / bob / flip / halo confounds.
+///
+/// Kept module-level so `office.rs` can peek at it to decide whether
+/// to render the reference sprite. Read once per launch — no hot
+/// path cost.
+pub static DEBUG_SPRITES: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("PERICLAW_SPRITE_DEBUG").is_ok());
+
+/// Draw a lobster centered on `center`, picking the frame based on
+/// status and clock phase. Running/Unknown agents cycle the WALK
+/// frames; Ok agents cycle IDLE; Disabled/Errored pin to the first
+/// idle frame (still visible, just not animating).
+///
+/// `flip_h` mirrors the sprite horizontally via a canvas transform
+/// so a lobster can face either direction without per-direction
+/// frames.
+pub fn draw_lobster(
+    frame: &mut canvas::Frame,
+    center: Point,
+    status: AgentStatus,
+    seconds: f32,
+    flip_h: bool,
+) {
+    // Pick the (unflipped, flipped) handle arrays + anchor table for
+    // this status. The two arrays share one decode pass via
+    // `LOBSTER_*_HANDLES` so frame i is guaranteed pixel-mirrored
+    // against frame i unflipped.
+    type PoseSelection<'a> = (
+        &'a [iced_image::Handle],
+        &'a [iced_image::Handle],
+        &'a [(f32, f32)],
+        f32,
+    );
+    let (unflipped, flipped, anchors, hz): PoseSelection = match status {
+        AgentStatus::Running | AgentStatus::Unknown => (
+            &LOBSTER_WALK_HANDLES.0,
+            &LOBSTER_WALK_HANDLES.1,
+            &LOBSTER_WALK_ANCHORS,
+            6.0,
+        ),
+        AgentStatus::Ok => (
+            &LOBSTER_IDLE_HANDLES.0,
+            &LOBSTER_IDLE_HANDLES.1,
+            &LOBSTER_IDLE_ANCHORS,
+            3.0,
+        ),
+        AgentStatus::Error | AgentStatus::Disabled => (
+            &LOBSTER_IDLE_HANDLES.0,
+            &LOBSTER_IDLE_HANDLES.1,
+            &LOBSTER_IDLE_ANCHORS,
+            0.0,
+        ),
+    };
+    let frames = if flip_h { flipped } else { unflipped };
+    let (idx, phase) = if hz <= 0.0 || frames.is_empty() {
+        (0, 0.0_f32)
+    } else {
+        let raw_phase = (seconds * hz).rem_euclid(frames.len() as f32);
+        let i = (raw_phase as usize).min(frames.len() - 1);
+        (i, raw_phase)
+    };
+    let handle = frames[idx].clone();
+
+    // Per-frame anchor shift. Each PNG was padded to a 140×170
+    // canvas with the sprite centered on its blob centroid, but
+    // centroid ≠ body midline when claws/legs are extended — a
+    // walking lobster's centroid drifts up to 6 source px across
+    // the cycle. The anchor table records where the visible body
+    // midline lives in each *unflipped* source frame; for a flipped
+    // handle, the x anchor mirrors across the canvas X midpoint so
+    // the body lands on `center` in either facing direction.
+    let (raw_ax, ay) = anchors[idx.min(anchors.len() - 1)];
+    let ax = if flip_h {
+        LOBSTER_SOURCE.width - raw_ax
+    } else {
+        raw_ax
+    };
+    let canvas_cx = LOBSTER_SOURCE.width / 2.0;
+    let canvas_cy = LOBSTER_SOURCE.height / 2.0;
+    let scale_x = LOBSTER_SIZE.width / LOBSTER_SOURCE.width;
+    let scale_y = LOBSTER_SIZE.height / LOBSTER_SOURCE.height;
+    let dx = (ax - canvas_cx) * scale_x;
+    let dy = (ay - canvas_cy) * scale_y;
+
+    // Pin the bounds origin to integer pixels before handing them
+    // to iced. Sub-pixel positions from wander / bob offsets would
+    // feed into the image renderer, and even at `FilterMethod::
+    // Nearest` the GPU picks subtly different source texels each
+    // frame — visible shimmer along the sprite's edges.
+    // `snap(true)` on the Image is belt-and-suspenders with this.
+    let bounds = Rectangle::new(
+        Point::new(
+            (center.x - LOBSTER_SIZE.width / 2.0 - dx).floor(),
+            (center.y - LOBSTER_SIZE.height / 2.0 - dy).floor(),
+        ),
+        LOBSTER_SIZE,
+    );
+    let image = iced_image::Image::new(handle)
+        .filter_method(iced_image::FilterMethod::Nearest)
+        .snap(true);
+
+    // No transform. The mirror is pre-baked into the flipped handle
+    // at LazyLock init — rendering with an unmodified transform
+    // stack avoids iced 0.14's canvas-backend quirk where a
+    // negative X scale inverts the image on Y (produced the
+    // upside-down lobsters seen when flip_h was applied via
+    // `scale_nonuniform`).
+    frame.draw_image(bounds, image);
+
+    // Debug overlay. Env-gated so it doesn't pay the price in
+    // normal runs. Makes flicker sources visible:
+    //   - Crosshair at `center` — should stay rock-still even
+    //     while the sprite cycles. If the body's visible midline
+    //     drifts off the crosshair, the anchor table needs a
+    //     nudge for the frame index shown below.
+    //   - Bounds wireframe — reveals whether bounds origin
+    //     snapped to integers cleanly.
+    //   - `idx` and `phase` text — so the tuning loop is "watch
+    //     which frame looks off → edit that index in the anchor
+    //     table → rebuild".
+    if *DEBUG_SPRITES {
+        let crosshair_color = *theme::TERMINAL_GREEN;
+        let x_line = canvas::Path::line(
+            Point::new(center.x - 12.0, center.y),
+            Point::new(center.x + 12.0, center.y),
+        );
+        let y_line = canvas::Path::line(
+            Point::new(center.x, center.y - 12.0),
+            Point::new(center.x, center.y + 12.0),
+        );
+        frame.stroke(
+            &x_line,
+            canvas::Stroke::default()
+                .with_color(crosshair_color)
+                .with_width(1.0),
+        );
+        frame.stroke(
+            &y_line,
+            canvas::Stroke::default()
+                .with_color(crosshair_color)
+                .with_width(1.0),
+        );
+        let wireframe = canvas::Path::rectangle(bounds.position(), bounds.size());
+        frame.stroke(
+            &wireframe,
+            canvas::Stroke::default()
+                .with_color(crosshair_color)
+                .with_width(1.0),
+        );
+        frame.fill_text(canvas::Text {
+            content: format!("i={idx} p={phase:.2}"),
+            position: Point::new(bounds.x, bounds.y + bounds.height + 2.0),
+            color: *theme::MUTED,
+            size: 10.0.into(),
+            font: iced::Font::MONOSPACE,
+            ..Default::default()
+        });
+    }
+}
 
 /// CRT monitor — screen + stand. Single-frame because it's a
 /// machine; the screen "glow" is added at draw time as a scrolling
@@ -257,18 +506,6 @@ pub fn decor_for_room(room: crate::domain::RoomId) -> Option<&'static Sprite> {
     })
 }
 
-/// Pick the template for an agent. Main agents get the humanoid,
-/// crons get the ghost, channels get the monitor. Distinct silhouettes
-/// at a glance — the operator can tell three crons + two channels
-/// apart from two chat-capable agents without reading labels.
-pub fn sprite_for(agent: &Agent) -> &'static Sprite {
-    match agent.kind {
-        AgentKind::Main => &HUMANOID,
-        AgentKind::Cron => &GHOST,
-        AgentKind::Channel => &MONITOR,
-    }
-}
-
 /// Pick a reasonable scale (pixels per cell) for a sprite that fits
 /// within the room slot. 3px per cell is the sweet spot — any larger
 /// and a 16-wide sprite overruns neighboring slots; any smaller and
@@ -298,6 +535,10 @@ pub fn sprite_size_px(sprite: &Sprite, scale: f32) -> Size {
 /// the draw function itself is stateless so the caller owns the
 /// clock — Running agents pass a higher `frame_hz`, idle ones pass
 /// a slower one, and fully-static sprites pass `0.0`.
+///
+/// `flip_h` mirrors the frame horizontally — a lobster facing left
+/// on its way back across the room without needing a second set of
+/// frames.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_sprite_pixels(
     frame: &mut canvas::Frame,
@@ -308,6 +549,7 @@ pub fn draw_sprite_pixels(
     intensity: f32,
     seconds: f32,
     frame_hz: f32,
+    flip_h: bool,
 ) {
     let width = sprite.width() as f32 * scale;
     let height = sprite.height() as f32 * scale;
@@ -322,6 +564,7 @@ pub fn draw_sprite_pixels(
     let outline = with_alpha(*theme::SURFACE_0, alpha);
 
     let rows = sprite.frame(seconds, frame_hz);
+    let sprite_w = sprite.width();
     for (row_idx, row) in rows.iter().enumerate() {
         for (col_idx, ch) in row.chars().enumerate() {
             let color = match ch {
@@ -332,12 +575,19 @@ pub fn draw_sprite_pixels(
                 _ => None,
             };
             let Some(color) = color else { continue };
+            // Mirror column index when flipping so the sprite faces
+            // the opposite direction without an alternate frame.
+            let draw_col = if flip_h {
+                sprite_w.saturating_sub(1).saturating_sub(col_idx)
+            } else {
+                col_idx
+            };
             // Draw each cell as a solid rectangle. Nearest-neighbor
             // comes for free with axis-aligned rects at integer-ish
             // positions — no filtering, no sub-pixel smear.
             let cell = canvas::Path::rectangle(
                 Point::new(
-                    origin.x + col_idx as f32 * scale,
+                    origin.x + draw_col as f32 * scale,
                     origin.y + row_idx as f32 * scale,
                 ),
                 Size::new(scale, scale),
@@ -411,14 +661,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_sprites_are_rectangular() {
+    fn char_grid_sprites_are_rectangular() {
         // Every row across every frame must have the same width and
         // frame height must match. A ragged row would mis-align the
         // render; a short frame would pop the sprite shorter on
-        // alternate ticks.
+        // alternate ticks. Applies to the remaining char-grid
+        // sprites (decor + MONITOR) — LOBSTER lives in image form
+        // now and is verified by the runtime PNG-decode path.
         for sprite in [
-            &GHOST,
-            &HUMANOID,
             &MONITOR,
             &TELESCOPE,
             &CONSOLE,
@@ -445,38 +695,64 @@ mod tests {
     }
 
     #[test]
-    fn frame_phase_cycles_through_all_frames() {
-        // `hz` reads as "frames per second" — at 2 Hz, each frame
-        // lasts 0.5 s, so a 2-frame sprite is on frame 0 during
-        // [0, 0.5) and on frame 1 during [0.5, 1.0), then wraps.
-        assert!(std::ptr::eq(
-            GHOST.frame(0.0, 2.0).as_ptr(),
-            GHOST.frames[0].as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            GHOST.frame(0.25, 2.0).as_ptr(),
-            GHOST.frames[0].as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            GHOST.frame(0.5, 2.0).as_ptr(),
-            GHOST.frames[1].as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            GHOST.frame(1.0, 2.0).as_ptr(),
-            GHOST.frames[0].as_ptr()
-        ));
-        // Hz = 0 pins frame 0 regardless of time (fully static
-        // sprites like the monitor use this).
-        assert!(std::ptr::eq(
-            GHOST.frame(10.0, 0.0).as_ptr(),
-            GHOST.frames[0].as_ptr()
-        ));
+    fn sprite_size_scales() {
+        let s = sprite_size_px(&MONITOR, 4.0);
+        assert_eq!(s.width, MONITOR.width() as f32 * 4.0);
+        assert_eq!(s.height, MONITOR.height() as f32 * 4.0);
     }
 
     #[test]
-    fn sprite_size_scales() {
-        let s = sprite_size_px(&GHOST, 4.0);
-        assert_eq!(s.width, GHOST.width() as f32 * 4.0);
-        assert_eq!(s.height, GHOST.height() as f32 * 4.0);
+    fn lobster_size_matches_source_scale() {
+        // Flicker fix depends on the target being an integer
+        // reciprocal of the source. Anything else gives fractional
+        // downsampling and the edges shimmer again.
+        assert_eq!(LOBSTER_SIZE.width, LOBSTER_SOURCE.width / 2.0);
+        assert_eq!(LOBSTER_SIZE.height, LOBSTER_SOURCE.height / 2.0);
+    }
+
+    #[test]
+    fn lobster_anchor_tables_match_frame_counts() {
+        // Index out-of-bounds in `draw_lobster` would panic at runtime
+        // and silently bury the flicker fix; catch a mismatched edit
+        // (e.g., someone adds a WALK frame without extending the
+        // anchor table) at compile-time-ish via tests instead.
+        assert_eq!(
+            LOBSTER_IDLE_HANDLES.0.len(),
+            LOBSTER_IDLE_ANCHORS.len(),
+            "idle frame count and anchor count must match",
+        );
+        assert_eq!(
+            LOBSTER_IDLE_HANDLES.1.len(),
+            LOBSTER_IDLE_ANCHORS.len(),
+            "idle flipped frame count and anchor count must match",
+        );
+        assert_eq!(
+            LOBSTER_WALK_HANDLES.0.len(),
+            LOBSTER_WALK_ANCHORS.len(),
+            "walk frame count and anchor count must match",
+        );
+        assert_eq!(
+            LOBSTER_WALK_HANDLES.1.len(),
+            LOBSTER_WALK_ANCHORS.len(),
+            "walk flipped frame count and anchor count must match",
+        );
+    }
+
+    #[test]
+    fn mirror_horizontal_reverses_rows() {
+        // 2×2 RGBA, row 0 = [R, G], row 1 = [B, A] (conceptually).
+        // After mirror, row 0 = [G, R], row 1 = [A, B].
+        #[rustfmt::skip]
+        let rgba = vec![
+            1, 0, 0, 255,   2, 0, 0, 255,
+            3, 0, 0, 255,   4, 0, 0, 255,
+        ];
+        let out = mirror_horizontal(2, 2, &rgba);
+        #[rustfmt::skip]
+        let expected = vec![
+            2, 0, 0, 255,   1, 0, 0, 255,
+            4, 0, 0, 255,   3, 0, 0, 255,
+        ];
+        assert_eq!(out, expected);
     }
 }

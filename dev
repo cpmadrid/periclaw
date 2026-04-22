@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Periclaw — Developer Convenience Script
+# PeriClaw — Developer Convenience Script
 # Thin router; activity implementations live in Scripts/.
 #
 # Usage: ./dev <activity> [options]
@@ -13,7 +13,7 @@ source "${DEV_SCRIPT_DIR}/Scripts/lib.sh"
 
 show_help() {
     cat << 'EOF'
-Periclaw — Developer Convenience Script
+PeriClaw — Developer Convenience Script
 
 USAGE:
     ./dev <activity> [options]

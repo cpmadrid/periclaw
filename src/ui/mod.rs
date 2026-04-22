@@ -7,6 +7,7 @@ pub mod chat_view;
 pub mod logs_view;
 pub mod palette;
 pub mod sessions_view;
+pub mod settings_view;
 pub mod sidebar;
 pub mod sparkline;
 pub mod status_bar;

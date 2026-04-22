@@ -13,17 +13,23 @@ use iced::widget::{Space, button, column, container, row, text};
 use iced::{Alignment, Border, Element, Length, Padding};
 
 use crate::Message;
+use crate::net::events::{PairRequest, PairRequestKind};
 use crate::net::rpc::ApprovalEventPayload;
 use crate::ui::theme;
 
-/// Render a "scope-upgrade pair-request pending" notice. Shows the
-/// CLI command in a selectable field + a Copy button so the operator
-/// doesn't have to manually retype or dig through logs.
-pub fn scope_upgrade_notice(request_id: &str) -> Element<'_, Message> {
-    let command = format!("openclaw devices approve {request_id}");
+/// Render the "pair-request pending" notice — drives both the
+/// initial-pair flow and the scope-upgrade flow off a single
+/// widget, since the approve-side command is identical and only
+/// the headline/body copy differs. Shows the CLI command in a
+/// selectable field + a Copy button so the operator doesn't have
+/// to retype or dig through logs.
+pub fn pair_request_notice(req: &PairRequest) -> Element<'_, Message> {
+    let command = format!("openclaw devices approve {}", req.request_id);
 
-    // text_input needs an on_input to stay interactive/selectable;
-    // we wire it to the InputDiscard sink so any edits are dropped.
+    // text_input with an InputDiscard on_input handler keeps the
+    // text selectable (so Cmd/Ctrl-C still works) while dropping
+    // any typed edits — the command is read-only from the
+    // operator's perspective.
     let field = iced::widget::text_input("", &command)
         .on_input(Message::InputDiscard)
         .font(iced::Font::MONOSPACE)
@@ -31,7 +37,10 @@ pub fn scope_upgrade_notice(request_id: &str) -> Element<'_, Message> {
         .padding(Padding::from([4, 8]))
         .width(Length::Fill);
 
-    let copy = iced::widget::button(text("Copy").size(11))
+    // "📋 Copy" — the clipboard glyph makes the button read as a
+    // copy action at a glance; the label stays for accessibility
+    // and for platforms where the emoji renders as a tofu block.
+    let copy = iced::widget::button(text("📋 Copy").size(11))
         .padding(Padding::from([4, 10]))
         .on_press(Message::CopyToClipboard(command.clone()));
 
@@ -49,21 +58,53 @@ pub fn scope_upgrade_notice(request_id: &str) -> Element<'_, Message> {
         .padding(Padding::from([4, 10]))
         .on_press(Message::RequestReconnect);
 
-    let body = column![
-        text("Scope upgrade pending").size(12).color(*theme::MUTED),
-        text(
-            "The gateway has filed a pair-request to grant this \
-             desktop approvals permission. Run this on the gateway \
-             host, then click Retry now:",
-        )
-        .size(12)
-        .color(*theme::FOREGROUND),
+    let (headline, body_copy) = match req.kind {
+        PairRequestKind::FirstPair => (
+            "Device pairing required",
+            "This desktop hasn't been approved on the gateway yet. \
+             From your OpenClaw terminal, run the command below, \
+             then click Retry now:",
+        ),
+        PairRequestKind::ScopeUpgrade => (
+            "Scope upgrade pending",
+            "The gateway needs you to approve additional permissions \
+             for this desktop. From your OpenClaw terminal, run the \
+             command below, then click Retry now:",
+        ),
+    };
+
+    let mut body = column![
+        text(headline).size(12).color(*theme::MUTED),
+        text(body_copy).size(12).color(*theme::FOREGROUND),
         command_row,
+    ]
+    .spacing(6);
+
+    // Surface the device id (SHA-256 of the Ed25519 pubkey, ~64
+    // hex chars) so the operator can cross-check against
+    // `openclaw devices list` output on the gateway host.
+    if let Some(device_id) = req.device_id.as_deref() {
+        body = body.push(
+            text(format!("Device id: {device_id}"))
+                .size(10)
+                .font(iced::Font::MONOSPACE)
+                .color(*theme::MUTED),
+        );
+    }
+
+    // The gateway may include a server-authored hint (e.g. "Remove
+    // this device from the pending pairing requests"). Prefer it
+    // verbatim when present — it's authoritative and more specific
+    // than anything we can hardcode here.
+    if let Some(hint) = req.remediation_hint.as_deref() {
+        body = body.push(text(format!("Hint: {hint}")).size(11).color(*theme::MUTED));
+    }
+
+    body = body.push(
         row![Space::new().width(Length::Fill), retry]
             .align_y(Alignment::Center)
             .width(Length::Fill),
-    ]
-    .spacing(6);
+    );
 
     container(body)
         .width(Length::Fill)

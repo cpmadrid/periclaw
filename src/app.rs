@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use iced::widget::{Canvas, canvas};
 use iced::{Element, Length, Subscription, Task, time};
 
+use crate::config;
 use crate::domain::{Agent, AgentId, AgentKind, AgentStatus, agent};
 use crate::logs::{self, LogFilters, LogLine, LogSeverity};
 use crate::net::events::{ActivityKind, GatewayUpdate};
@@ -16,12 +17,13 @@ use crate::net::{WsEvent, events, mock, openclaw};
 use crate::notifications::Notifier;
 use crate::palette::{self, PaletteAction, PaletteContext, PaletteEntry};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
+use crate::secret_store;
 use crate::ui::chat_view::ChatMessage;
 use crate::ui::{
     agent_card, agents_view, approvals, chat_input, chat_view, logs_view, palette as palette_view,
-    sessions_view, sidebar, status_bar, theme,
+    sessions_view, settings_view, sidebar, status_bar, theme,
 };
-use crate::ui_state::{self, UiState, WindowState};
+use crate::ui_state::{self, Settings, UiState, WindowState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavItem {
@@ -131,6 +133,26 @@ pub enum Message {
     /// hides window coordinates from the client), in which case we
     /// simply don't restore position on next launch.
     WindowMoved(f32, f32),
+    /// Settings-tab gateway URL field changed (every keystroke).
+    /// Updates the in-progress form; persistence happens on
+    /// [`Message::SettingsSave`].
+    SettingsGatewayUrlChanged(String),
+    /// Settings-tab mode radio — `"auto" | "ws" | "mock"`.
+    SettingsModeSelected(&'static str),
+    /// Settings-tab token input (masked) changed. Write-only buffer:
+    /// the field is never populated from storage, and it's cleared
+    /// after a successful save. Keystrokes never leave the process
+    /// until the operator clicks Save.
+    SettingsTokenChanged(String),
+    /// Settings-tab Save pressed. Flushes the form to persisted
+    /// settings + writes any non-empty token through `secret_store`,
+    /// then clears the token field so the UI reverts to the
+    /// "token-present" state.
+    SettingsSave,
+    /// Settings-tab Clear Token pressed. Purges the token from the
+    /// OS keychain AND the plaintext fallback file, regardless of
+    /// build flavor — Clear means clear everywhere.
+    SettingsClearToken,
 }
 
 pub struct App {
@@ -157,11 +179,12 @@ pub struct App {
     pub sessions: HashMap<String, SessionInfo>,
     /// Gateway-side update notification, when one is pending.
     pub gateway_update: Option<GatewayUpdate>,
-    /// Non-None when the gateway has filed a scope-upgrade
-    /// pair-request for this device and is waiting on the operator
-    /// to approve it (`openclaw devices approve <id>`). Surfaced in
-    /// the approvals panel area so the fix is visible.
-    pub scope_upgrade_pending: Option<String>,
+    /// Non-None when the gateway has filed a pair-request (first
+    /// pair OR scope upgrade) for this device and is waiting on
+    /// the operator to approve it out-of-band (`openclaw devices
+    /// approve <id>`). Surfaced in the approvals panel area so the
+    /// fix is visible from any tab.
+    pub pending_pair_request: Option<crate::net::events::PairRequest>,
     /// Full cron state per cron agent — keeps schedule-adjacent fields
     /// (`nextRunAtMs`, `lastRunAtMs`, `lastDurationMs`, `lastError`)
     /// that the Agents tab shows but the Overview sprite doesn't need.
@@ -295,6 +318,100 @@ pub struct App {
     /// writing the state file dozens of times per second.
     pending_window: Option<WindowState>,
     pending_window_since: Option<Instant>,
+    /// Persisted connection settings (gateway URL + mode). Mirrors
+    /// `UiState.settings` on disk. The Settings tab mutates this in
+    /// place and triggers a write via `ui_state::save`; the ws
+    /// subscription reads `gateway_url` here (with env-var override)
+    /// to decide what to connect to.
+    pub settings: Settings,
+    /// In-progress Settings-tab form. Seeded from `settings` at
+    /// startup and after each Save so navigating away and back
+    /// preserves the displayed values; the token field is a
+    /// write-only buffer that stays empty and isn't echoed back
+    /// from storage.
+    pub settings_form: SettingsForm,
+    /// Cached "is a token currently saved?" flag. Populated at
+    /// startup by `secret_store::has_token` and refreshed on Save /
+    /// Clear so the view can toggle its status line without a live
+    /// keychain call on every redraw.
+    pub token_present: bool,
+    /// Cached resolved token passed to the ws subscription. Populated
+    /// from `config::try_load_token()` at startup + after Save /
+    /// Clear; `subscription()` is called dozens of times per second
+    /// by Iced, so resolving on every call (which hits disk + the
+    /// keychain) is a non-starter. Stored as `Option<String>`
+    /// because the gateway's Tailscale-auth path runs without a
+    /// token at all.
+    cached_token: Option<String>,
+    /// Result of the most recent connect attempt, surfaced in the
+    /// Settings tab so the operator gets feedback after Save
+    /// without having to check the status bar. Drives the "status"
+    /// line under the Gateway URL field.
+    pub connection_status: ConnectionStatus,
+    /// Bumps every time the operator clicks Save. Participates in
+    /// `ConnectParams`' `Hash` so the ws subscription identity
+    /// changes even when URL + token are unchanged — otherwise a
+    /// Save with identical values would be a silent no-op and the
+    /// operator would never see fresh "connecting / connected"
+    /// feedback.
+    save_nonce: u64,
+}
+
+/// Current connect attempt's outcome, shown in the Settings tab. A
+/// reconnect loop on a bad URL cycles between `Connecting` and
+/// `Failed` — the field reflects the latest event honestly rather
+/// than freezing on the first failure.
+#[derive(Debug, Clone, Default)]
+pub enum ConnectionStatus {
+    /// No Save this session, no attempt yet. View reads this as
+    /// "(not tested)".
+    #[default]
+    Untested,
+    /// WS subscription is alive and trying to establish a session.
+    Connecting,
+    /// Handshake succeeded and events are flowing.
+    Ok,
+    /// Latest attempt landed on `WsEvent::Disconnected(reason)`.
+    /// Carries the reason string so the operator can see what
+    /// went wrong (connection refused, TLS error, handshake
+    /// rejection, etc.).
+    Failed(String),
+}
+
+/// Ephemeral Settings-tab form state. Not persisted — it mirrors
+/// `settings` plus a write-only `token` buffer that never reads from
+/// storage. Stored on `App` so the contents survive navigating away
+/// and back to the Settings tab within one session.
+#[derive(Debug, Clone, Default)]
+pub struct SettingsForm {
+    pub gateway_url: String,
+    /// `"auto"`, `"ws"`, or `"mock"`.
+    pub mode: &'static str,
+    /// Write-only token input. Cleared after Save; never populated
+    /// from storage. Empty string means "operator hasn't typed
+    /// anything this session".
+    pub token: String,
+}
+
+impl SettingsForm {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            gateway_url: settings.gateway_url.clone().unwrap_or_default(),
+            mode: mode_as_static(settings.mode.as_deref()),
+            token: String::new(),
+        }
+    }
+}
+
+/// Map a persisted mode string onto the small set of `&'static str`
+/// values the radio widget uses. Unknown values normalize to
+/// `"auto"` so old state files with typo'd modes don't get stuck.
+fn mode_as_static(mode: Option<&str>) -> &'static str {
+    match mode {
+        Some("ws") => "ws",
+        Some("mock") => "mock",
+        _ => "auto",
+    }
 }
 
 /// What the currently-selected agent is doing right now, as far as
@@ -365,11 +482,31 @@ impl App {
     /// when `agents.list` arrives the selection simply stays put and
     /// `chat.history` fires on first open as usual.
     pub fn new(state: UiState) -> Self {
-        let nav = state
-            .tab
-            .as_deref()
-            .and_then(ui_state::nav_from_str)
-            .unwrap_or(NavItem::Overview);
+        // First-run detection: if the operator has never configured a
+        // gateway URL (neither persisted nor as an env var) and isn't
+        // opting into mock mode, bounce them straight to the Settings
+        // tab on launch — there's nothing meaningful to show on any
+        // other tab until a URL is set.
+        let first_run_incomplete = !mock::enabled()
+            && std::env::var("OPENCLAW_GATEWAY_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .is_none()
+            && state
+                .settings
+                .gateway_url
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .is_none();
+        let nav = if first_run_incomplete {
+            NavItem::Settings
+        } else {
+            state
+                .tab
+                .as_deref()
+                .and_then(ui_state::nav_from_str)
+                .unwrap_or(NavItem::Overview)
+        };
         let selected_chat_agent = state
             .selected_agent
             .as_deref()
@@ -388,7 +525,7 @@ impl App {
             pending_approvals: HashMap::new(),
             sessions: HashMap::new(),
             gateway_update: None,
-            scope_upgrade_pending: None,
+            pending_pair_request: None,
             cron_details: HashMap::new(),
             cron_ids: HashMap::new(),
             channel_details: HashMap::new(),
@@ -418,6 +555,21 @@ impl App {
             palette_selected: 0,
             pending_window: state.window,
             pending_window_since: None,
+            settings_form: SettingsForm::from_settings(&state.settings),
+            // Status reflects what the ws subscription will actually
+            // do in `fn subscription`: no URL → stays Untested; URL
+            // configured → enters Connecting immediately so the
+            // Settings view doesn't flash "(not tested)" for a split
+            // second before the first WsEvent lands.
+            connection_status: if first_run_incomplete || mock::enabled() {
+                ConnectionStatus::Untested
+            } else {
+                ConnectionStatus::Connecting
+            },
+            settings: state.settings,
+            token_present: secret_store::has_token(),
+            cached_token: config::try_load_token(),
+            save_nonce: 0,
         }
     }
 
@@ -487,6 +639,28 @@ impl App {
         self.update(message)
     }
 
+    /// `true` when no gateway URL is configured and mock mode isn't
+    /// active — i.e. the app has nothing useful to connect to and
+    /// the Settings tab should show a first-run banner asking the
+    /// operator to configure one.
+    pub fn first_run_incomplete(&self) -> bool {
+        if mock::enabled() {
+            return false;
+        }
+        if std::env::var("OPENCLAW_GATEWAY_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some()
+        {
+            return false;
+        }
+        self.settings
+            .gateway_url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .is_none()
+    }
+
     /// Snapshot the bits of the app we persist across launches.
     fn ui_state_snapshot(&self) -> UiState {
         UiState {
@@ -494,6 +668,7 @@ impl App {
             selected_agent: Some(self.selected_chat_agent.as_str().to_string()),
             active_session_key: self.active_session_key.clone(),
             window: self.pending_window,
+            settings: self.settings.clone(),
         }
     }
 
@@ -636,10 +811,10 @@ impl App {
             Message::RequestReconnect => {
                 tracing::info!("UI: operator requested reconnect");
                 // Clear the notice optimistically — the WS will either
-                // reconnect and send a fresh `ScopeUpgradePending` if
+                // reconnect and send a fresh `PairRequestPending` if
                 // still unpaired, or `Connected` if the approval took
                 // effect.
-                self.scope_upgrade_pending = None;
+                self.pending_pair_request = None;
                 if let Err(e) = crate::net::commands::sender()
                     .send(crate::net::commands::GatewayCommand::Reconnect)
                 {
@@ -845,6 +1020,83 @@ impl App {
                 self.pending_window_since = Some(Instant::now());
                 Task::none()
             }
+            Message::SettingsGatewayUrlChanged(value) => {
+                self.settings_form.gateway_url = value;
+                Task::none()
+            }
+            Message::SettingsModeSelected(value) => {
+                self.settings_form.mode = value;
+                Task::none()
+            }
+            Message::SettingsTokenChanged(value) => {
+                self.settings_form.token = value;
+                Task::none()
+            }
+            Message::SettingsSave => {
+                // Flush the form's non-secret fields into persisted
+                // settings. Empty gateway URL is stored as `None` so
+                // the ws subscription stays idle instead of trying
+                // to connect to the empty string.
+                let trimmed_url = self.settings_form.gateway_url.trim();
+                self.settings.gateway_url =
+                    (!trimmed_url.is_empty()).then(|| trimmed_url.to_string());
+                // Mode `"auto"` doesn't need to be persisted — it's
+                // the default. Only stash a non-default choice so old
+                // state files that predate the setting don't suddenly
+                // grow a `"mode": "auto"` entry.
+                self.settings.mode = match self.settings_form.mode {
+                    "ws" | "mock" => Some(self.settings_form.mode.to_string()),
+                    _ => None,
+                };
+                ui_state::save(&self.ui_state_snapshot());
+
+                // Token: only touch the secret store when the operator
+                // actually typed something. An empty field on Connect
+                // means "don't change the current token" — use Clear
+                // to delete. We deliberately *don't* wipe the form
+                // field after save — operators expect their typed
+                // value to stay visible (masked) so they can tell
+                // their entry persisted, rather than being left
+                // staring at a blank input wondering if it took.
+                let token = self.settings_form.token.trim().to_string();
+                if !token.is_empty() {
+                    if let Err(e) = secret_store::save_token(&token) {
+                        tracing::warn!(error = %e, "saving token to secret store failed");
+                    } else {
+                        self.token_present = true;
+                        // Refresh the cached token so the ws
+                        // subscription's identity changes and Iced
+                        // tears down + restarts the session with
+                        // the new credential.
+                        self.cached_token = config::try_load_token();
+                    }
+                }
+                // Bump the nonce and mark status `Connecting` so the
+                // Settings view shows fresh feedback even when the
+                // operator re-saved the same URL/token (which
+                // wouldn't otherwise change the subscription identity).
+                self.save_nonce = self.save_nonce.wrapping_add(1);
+                self.connection_status = if self.first_run_incomplete() {
+                    ConnectionStatus::Untested
+                } else {
+                    ConnectionStatus::Connecting
+                };
+                Task::none()
+            }
+            Message::SettingsClearToken => {
+                secret_store::clear_token();
+                self.token_present = false;
+                self.settings_form.token.clear();
+                // Drop the in-memory token directly rather than
+                // re-running the resolver. The resolver's last-
+                // resort path reads from `~/.openclaw/openclaw.json`
+                // and stashes whatever it finds back into the secret
+                // store — which would silently undo the Clear for
+                // OpenClaw-CLI users and is the opposite of what the
+                // operator asked for.
+                self.cached_token = None;
+                Task::none()
+            }
             Message::Tick => {
                 let now = Instant::now();
                 let before = self.bubbles.len();
@@ -909,11 +1161,13 @@ impl App {
             WsEvent::Connected => {
                 self.connected = true;
                 self.last_disconnect = None;
+                self.connection_status = ConnectionStatus::Ok;
                 tracing::info!("WS connected");
             }
             WsEvent::Disconnected(reason) => {
                 self.connected = false;
                 self.last_disconnect = Some(reason.clone());
+                self.connection_status = ConnectionStatus::Failed(reason.clone());
                 // Reset the "hydrated this connection" set so the
                 // next successful connect re-pulls chat.history as
                 // the operator touches each agent. Logs themselves
@@ -1341,14 +1595,15 @@ impl App {
                     logs::push_line(&mut self.log_lines, LogLine::classify(line));
                 }
             }
-            WsEvent::ScopeUpgradePending(request_id) => {
-                if request_id.is_some() {
+            WsEvent::PairRequestPending(req) => {
+                if let Some(pr) = req.as_ref() {
                     tracing::info!(
-                        request_id = ?request_id,
-                        "scope-upgrade pair-request filed",
+                        request_id = %pr.request_id,
+                        kind = ?pr.kind,
+                        "pair-request filed",
                     );
                 }
-                self.scope_upgrade_pending = request_id;
+                self.pending_pair_request = req;
             }
             WsEvent::ApprovalResolved { id } => {
                 self.last_poll = Some(Instant::now());
@@ -1481,12 +1736,25 @@ impl App {
                 &self.log_filters,
                 self.logs_auto_tail,
             ),
-            NavItem::Settings => coming_soon("Settings"),
+            NavItem::Settings => settings_view::view(settings_view::Snapshot {
+                settings: &self.settings,
+                form: &self.settings_form,
+                first_run_incomplete: self.first_run_incomplete(),
+                token_present: self.token_present,
+                storage_location: secret_store::storage_location_hint(),
+                connection_status: &self.connection_status,
+            }),
         };
 
         let total_unread: usize = self.unread.values().copied().sum();
+        // Stack: [tab-specific main] on top, global bottom strip
+        // (pair notice, approvals, status bar) below. The bottom
+        // strip used to live inside `overview()`, which meant
+        // switching to Settings or any other tab hid critical state
+        // like the pair-request notice with the approve-command.
+        let main_with_strip = iced::widget::column![main, self.bottom_strip()].spacing(0);
         let base = iced::widget::container(
-            iced::widget::row![sidebar::view(self.nav, total_unread), main].spacing(0),
+            iced::widget::row![sidebar::view(self.nav, total_unread), main_with_strip].spacing(0),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1523,9 +1791,29 @@ impl App {
         };
 
         let canvas = Canvas::new(scene).width(Length::Fill).height(Length::Fill);
-
         let cards = agent_card::row_view(&self.roster, &self.statuses);
 
+        iced::widget::column![
+            iced::widget::container(canvas)
+                .width(Length::Fill)
+                .height(Length::FillPortion(3))
+                .padding(iced::Padding::from(16)),
+            cards,
+            chat_input::view(
+                &self.chat_input,
+                self.connected,
+                &self.selected_chat_display(),
+            ),
+        ]
+        .spacing(0)
+        .into()
+    }
+
+    /// Build the bottom strip — pair-request notice (when a pair is
+    /// pending), pending-approvals panel, and the always-on status
+    /// bar. These are global concerns, not Overview-specific, so the
+    /// top-level `view` renders them under every tab's main content.
+    fn bottom_strip(&self) -> Element<'_, Message> {
         let main_usage = self
             .sessions
             .get("agent:main:main")
@@ -1544,48 +1832,41 @@ impl App {
                 .map(|u| (u.current.as_str(), u.latest.as_str())),
         });
 
-        // The approvals panel is a no-op row (empty iterator) when
-        // nothing's pending, so we can always include it in the
-        // layout without case-splitting on length.
-        let approvals_panel = if self.pending_approvals.is_empty() {
-            None
-        } else {
-            Some(approvals::view(self.pending_approvals.iter()))
-        };
-        let scope_notice = self
-            .scope_upgrade_pending
-            .as_deref()
-            .map(approvals::scope_upgrade_notice);
-
-        let mut col = iced::widget::column![
-            iced::widget::container(canvas)
-                .width(Length::Fill)
-                .height(Length::FillPortion(3))
-                .padding(iced::Padding::from(16)),
-            cards,
-            chat_input::view(
-                &self.chat_input,
-                self.connected,
-                &self.selected_chat_display(),
-            ),
-        ]
-        .spacing(0);
-        if let Some(notice) = scope_notice {
-            col = col.push(notice);
+        let mut col = iced::widget::column![].spacing(0);
+        if let Some(req) = self.pending_pair_request.as_ref() {
+            col = col.push(approvals::pair_request_notice(req));
         }
-        if let Some(panel) = approvals_panel {
-            col = col.push(panel);
+        if !self.pending_approvals.is_empty() {
+            col = col.push(approvals::view(self.pending_approvals.iter()));
         }
         col.push(status).into()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
         // `OPENCLAW_MOCK=1` routes to the scripted fixture stream for UI
-        // work without a live gateway; otherwise we run the native WS.
+        // work without a live gateway; otherwise we resolve the gateway
+        // URL (env > persisted settings) and attach a native WS
+        // subscription keyed on the URL so URL changes auto-restart it.
+        // When no URL is configured, the ws subscription stays idle
+        // until the operator saves one via the Settings tab.
         let ws = if mock::enabled() {
             Subscription::run(mock::connect).map(Message::Ws)
+        } else if let Some(gateway_url) = config::gateway_url(self.settings.gateway_url.as_deref())
+        {
+            let params = openclaw::ConnectParams {
+                gateway_url,
+                token: self.cached_token.clone(),
+                save_nonce: self.save_nonce,
+            };
+            // Explicit fn-pointer cast — `openclaw::connect` returns
+            // `impl Stream`, which is a fn-item not a fn-pointer, and
+            // `Subscription::run_with` needs the latter. Coercing via
+            // `as fn(…) -> _` lets the compiler pin down the opaque
+            // return type to the one monomorphization we use here.
+            let builder: fn(&openclaw::ConnectParams) -> _ = openclaw::connect;
+            Subscription::run_with(params, builder).map(Message::Ws)
         } else {
-            Subscription::run(openclaw::connect).map(Message::Ws)
+            Subscription::none()
         };
 
         // Window + keyboard events both route through a single
@@ -1599,16 +1880,20 @@ impl App {
         // CPU on a quiet scene:
         // - 33 ms while anything is actively moving (bob, flash,
         //   thought bubble fading) — fluid at ~30fps.
-        // - 200 ms when sprites are just idle-cycling walk frames
-        //   (Main + Cron alternate at 0.6–1 Hz). A 5fps refresh is
-        //   plenty to show the frame change without a visible stutter.
+        // - 50 ms while sprites are idle-cycling frames (the lobster
+        //   IDLE loop at 3 Hz × 7 frames). An earlier 200 ms interval
+        //   produced a visible beat pattern: phase advances 0.6
+        //   frames per tick, so some frames rendered twice while
+        //   neighbours rendered once, reading as stutter rather
+        //   than smooth animation. 50 ms × 3 Hz = 0.15 frames/tick,
+        //   which samples the cycle finely enough to read smooth.
         // - 500 ms when the scene is truly static (all disabled or
         //   all Channels, which don't cycle frames).
         let now = Instant::now();
         let tick_interval = if !self.bubbles.is_empty() || self.any_sprite_animating(now) {
             Duration::from_millis(33)
         } else if self.any_sprite_idle_cycling() {
-            Duration::from_millis(200)
+            Duration::from_millis(50)
         } else {
             Duration::from_millis(500)
         };
@@ -1759,23 +2044,6 @@ fn global_event_filter(
         }
         _ => None,
     }
-}
-
-fn coming_soon(title: &'static str) -> Element<'static, Message> {
-    iced::widget::center(
-        iced::widget::column![
-            iced::widget::text(title).size(24).color(*theme::FOREGROUND),
-            iced::widget::text("coming soon")
-                .size(13)
-                .color(*theme::MUTED),
-        ]
-        .spacing(8)
-        .align_x(iced::Alignment::Center),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(iced::Padding::from(24))
-    .into()
 }
 
 #[cfg(test)]

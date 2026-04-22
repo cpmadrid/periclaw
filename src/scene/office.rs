@@ -13,7 +13,7 @@ use iced::{Color, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::Message;
 use crate::domain::{Agent, AgentId, AgentStatus, RoomId, room_for};
-use crate::scene::{RoomLayout, ThoughtBubble};
+use crate::scene::{RoomLayout, ThoughtBubble, sprite};
 use crate::ui::theme;
 
 /// Snapshot of what to draw. Cheap to clone; recreated each `view()`.
@@ -66,8 +66,10 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
             }
 
             let now = Instant::now();
+            let seconds = clock_phase(now);
             let mut sprite_positions: HashMap<AgentId, Point> = HashMap::new();
             for (room, agents) in per_room {
+                let room_rect = layout.room_rect(room);
                 for (idx, agent) in agents.iter().enumerate() {
                     let base_pos = layout.sprite_slot(room, idx);
                     let status = self
@@ -80,12 +82,26 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                         .get(&agent.id)
                         .map(|t| transition_flash(now.saturating_duration_since(*t)))
                         .unwrap_or(0.0);
-                    let pos = animated_position(base_pos, status, now);
-                    let seconds = clock_phase(now);
-                    draw_sprite(frame, pos, agent, status, flash, seconds);
-                    // Bubble anchor stays on the static slot so the
-                    // tail doesn't whip around with the bob.
-                    sprite_positions.insert(agent.id.clone(), base_pos);
+                    // Ok/Unknown agents slow-wander around their home
+                    // slot. Running adds a vertical bob on top of the
+                    // base position (stays where they're working).
+                    // Errored/Disabled stay anchored to their slot.
+                    let sprite_half = sprite_half_size(agent.kind);
+                    let (wander, facing_left) = wander_offset(
+                        &agent.id,
+                        &room_rect,
+                        base_pos,
+                        sprite_half,
+                        seconds,
+                        status,
+                    );
+                    let wander_pos = Point::new(base_pos.x + wander.x, base_pos.y + wander.y);
+                    let pos = animated_position(wander_pos, status, now);
+                    draw_sprite(frame, pos, agent, status, flash, seconds, facing_left);
+                    // Bubble anchor stays on the wander-adjusted
+                    // position but not the bob — the tail shouldn't
+                    // whip around while the sprite's bouncing.
+                    sprite_positions.insert(agent.id.clone(), wander_pos);
                 }
             }
 
@@ -97,6 +113,22 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                     continue;
                 };
                 draw_bubble(frame, anchor, &bubble.text, bubble.kind, alpha);
+            }
+
+            // Debug reference lobster: a fixed-position WALK-cycling
+            // sprite in the top-left, with no wander, no bob, no
+            // flip-horizontal, no halo flash. Makes pose-shift flicker
+            // vs. sub-pixel edge shimmer visually distinguishable —
+            // the render bounds are stable, so any movement reveals
+            // frame-to-frame anchor drift directly.
+            if *crate::scene::sprite::DEBUG_SPRITES {
+                sprite::draw_lobster(
+                    frame,
+                    Point::new(80.0, 80.0),
+                    AgentStatus::Running,
+                    seconds,
+                    false,
+                );
             }
         });
 
@@ -152,6 +184,7 @@ fn draw_room(frame: &mut canvas::Frame, layout: &RoomLayout, room: RoomId) {
             0.75,
             0.0,
             0.0,
+            false,
         );
     }
 }
@@ -206,6 +239,7 @@ fn draw_bubble(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_sprite(
     frame: &mut canvas::Frame,
     pos: Point,
@@ -213,32 +247,19 @@ fn draw_sprite(
     status: AgentStatus,
     flash: f32,
     seconds: f32,
+    flip_h: bool,
 ) {
-    use crate::scene::sprite::{self, DEFAULT_SCALE};
+    use crate::domain::AgentKind;
+    use crate::scene::sprite::{self, DEFAULT_SCALE, LOBSTER_SIZE};
 
     let color: Color = agent.color();
-    let template = sprite::sprite_for(agent);
-    let size = sprite::sprite_size_px(template, DEFAULT_SCALE);
 
-    // Disabled agents render muted — the pixels are still there but
-    // softened, so the operator reads "present but off" instead of
-    // "gone." Error/Unknown stay fully lit so they're eye-catching.
-    let intensity = match status {
-        AgentStatus::Disabled => 0.45,
-        AgentStatus::Unknown => 0.75,
-        _ => 1.0,
-    };
-
-    // Frame rate per state: running agents walk/flutter faster,
-    // idle ones shift slowly (still alive, not urgent), disabled
-    // freeze entirely.
-    let frame_hz = match (agent.kind, status) {
-        (_, AgentStatus::Disabled) => 0.0,
-        (crate::domain::AgentKind::Cron, AgentStatus::Running) => 4.0,
-        (crate::domain::AgentKind::Main, AgentStatus::Running) => 3.0,
-        (crate::domain::AgentKind::Cron, _) => 1.0,
-        (crate::domain::AgentKind::Main, _) => 0.6,
-        (crate::domain::AgentKind::Channel, _) => 0.0,
+    // Flash halo size depends on which sprite path we take, since
+    // lobsters render at a fixed pixel size and char-grid sprites
+    // scale with their template dimensions.
+    let halo_size = match agent.kind {
+        AgentKind::Main | AgentKind::Cron => LOBSTER_SIZE,
+        AgentKind::Channel => sprite::sprite_size_px(&sprite::MONITOR, DEFAULT_SCALE),
     };
 
     // Transition-flash halo. A brief, widening rectangle behind the
@@ -248,11 +269,11 @@ fn draw_sprite(
     if flash > 0.0 {
         let pad = 6.0 + 4.0 * flash;
         let halo_origin = Point::new(
-            pos.x - size.width / 2.0 - pad,
-            pos.y - size.height / 2.0 - pad,
+            pos.x - halo_size.width / 2.0 - pad,
+            pos.y - halo_size.height / 2.0 - pad,
         );
-        let halo_size = Size::new(size.width + pad * 2.0, size.height + pad * 2.0);
-        let halo = Path::rectangle(halo_origin, halo_size);
+        let halo_rect = Size::new(halo_size.width + pad * 2.0, halo_size.height + pad * 2.0);
+        let halo = Path::rectangle(halo_origin, halo_rect);
         frame.stroke(
             &halo,
             Stroke::default()
@@ -264,35 +285,51 @@ fn draw_sprite(
         );
     }
 
-    sprite::draw_sprite_pixels(
-        frame,
-        pos,
-        template,
-        DEFAULT_SCALE,
-        color,
-        intensity,
-        seconds,
-        frame_hz,
-    );
-
-    // Channels get a scrolling scanline on the "screen" region of
-    // the monitor sprite (rows 3..8, cols 3..12 in the template),
-    // but only while connected — a disabled provider's dark screen
-    // sells "off."
-    if matches!(agent.kind, crate::domain::AgentKind::Channel)
-        && !matches!(status, AgentStatus::Disabled)
-    {
-        sprite::draw_scanline(
-            frame,
-            pos,
-            template,
-            DEFAULT_SCALE,
-            3..8,
-            3..12,
-            seconds,
-            color,
-        );
+    match agent.kind {
+        AgentKind::Main | AgentKind::Cron => {
+            // Image-based lobster. Per-frame color tinting isn't
+            // applied — the sprite artwork is its own identity; the
+            // existing per-agent color is used only for the halo
+            // flash above. Operator-visible color customization
+            // comes back when we ship multiple sheet variants.
+            sprite::draw_lobster(frame, pos, status, seconds, flip_h);
+        }
+        AgentKind::Channel => {
+            let template = &sprite::MONITOR;
+            let intensity = match status {
+                AgentStatus::Disabled => 0.45,
+                AgentStatus::Unknown => 0.75,
+                _ => 1.0,
+            };
+            sprite::draw_sprite_pixels(
+                frame,
+                pos,
+                template,
+                DEFAULT_SCALE,
+                color,
+                intensity,
+                seconds,
+                0.0,
+                flip_h,
+            );
+            // Scrolling scanline while connected — disabled stays
+            // dark.
+            if !matches!(status, AgentStatus::Disabled) {
+                sprite::draw_scanline(
+                    frame,
+                    pos,
+                    template,
+                    DEFAULT_SCALE,
+                    3..8,
+                    3..12,
+                    seconds,
+                    color,
+                );
+            }
+        }
     }
+    // Re-compute size for label offset below.
+    let size = halo_size;
 
     // Name tag under the sprite. We approximate "centered" by offsetting
     // by half the expected text width (monospace ≈ 6px per char @ 11pt).
@@ -307,6 +344,88 @@ fn draw_sprite(
         font: iced::Font::MONOSPACE,
         ..Text::default()
     });
+}
+
+/// Slow wander pattern — each agent drifts within a soft bounding
+/// box around its home slot via two orthogonal sines at slightly
+/// different periods, keyed by a hash of the agent id so siblings
+/// don't move in lockstep. Disabled and Errored agents stay still
+/// (they shouldn't look like they're idling around); Running stays
+/// put too (they're "working at their station" and the bob reads
+/// as busy). Only Ok / Unknown wander.
+///
+/// Returns the (x, y) offset from base plus a `facing_left` flag
+/// derived from the horizontal-velocity sign so the sprite flips
+/// when moving right-to-left.
+/// Sprite half-size, used by the wander clamp. `draw_sprite` picks
+/// the template by kind; wander_offset needs the same per-kind box
+/// so it can guarantee the rendered sprite never crosses a room
+/// edge. Kept in sync by convention — any new AgentKind that grows
+/// a wandering sprite needs an entry here.
+fn sprite_half_size(kind: crate::domain::AgentKind) -> Size {
+    use crate::domain::AgentKind;
+    use crate::scene::sprite::{self, DEFAULT_SCALE, LOBSTER_SIZE};
+    let full = match kind {
+        AgentKind::Main | AgentKind::Cron => LOBSTER_SIZE,
+        AgentKind::Channel => sprite::sprite_size_px(&sprite::MONITOR, DEFAULT_SCALE),
+    };
+    Size::new(full.width / 2.0, full.height / 2.0)
+}
+
+fn wander_offset(
+    agent_id: &AgentId,
+    room_rect: &Rectangle,
+    base_pos: Point,
+    sprite_half: Size,
+    seconds: f32,
+    status: AgentStatus,
+) -> (Point, bool) {
+    if !matches!(status, AgentStatus::Ok | AgentStatus::Unknown) {
+        return (Point::ORIGIN, false);
+    }
+    // Derive per-direction wander headroom from the sprite's current
+    // distance to each room edge minus its own half-size and a small
+    // margin. The tighter of the two (left/right or top/bottom)
+    // becomes the symmetric amplitude for that axis — a sprite
+    // placed in a left-column slot can only wander as far as the
+    // right-edge clearance allows before it clips the room border.
+    const EDGE_MARGIN: f32 = 4.0;
+    let left_room = (base_pos.x - room_rect.x) - sprite_half.width - EDGE_MARGIN;
+    let right_room = (room_rect.x + room_rect.width - base_pos.x) - sprite_half.width - EDGE_MARGIN;
+    let top_room = (base_pos.y - room_rect.y) - sprite_half.height - EDGE_MARGIN;
+    let bottom_room =
+        (room_rect.y + room_rect.height - base_pos.y) - sprite_half.height - EDGE_MARGIN;
+    let headroom_x = left_room.min(right_room).max(0.0);
+    let headroom_y = top_room.min(bottom_room).max(0.0);
+
+    // Feel tuning caps on top of the geometric headroom — we never
+    // want a sprite to dart 120 px even in a huge room; the earlier
+    // [8, 60]/[4, 24] hand-picked bands still define the max.
+    let amp_x = (room_rect.width * 0.18).clamp(0.0, 60.0).min(headroom_x);
+    let amp_y = (room_rect.height * 0.08).clamp(0.0, 24.0).min(headroom_y);
+
+    // Stable hash of the id — spreads sprites' phase offsets so
+    // two lobsters in the same room don't sine-wave in unison.
+    let mut h: u64 = 5381;
+    for b in agent_id.as_str().bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    let phase_x = (h % 360) as f32 * std::f32::consts::PI / 180.0;
+    let phase_y = ((h / 7) % 360) as f32 * std::f32::consts::PI / 180.0;
+    // Speed ∈ [0.10, 0.28] rad/sec — intentionally slow. Different
+    // per-agent so the office reads as organic rather than a clock
+    // tick.
+    let speed = 0.10 + ((h % 40) as f32 * 0.0045);
+
+    let t = seconds * speed;
+    let offset_x = (t + phase_x).sin() * amp_x;
+    // Y moves slower and with a different period so the path
+    // traces a wandering Lissajous rather than a straight diagonal.
+    let offset_y = (t * 0.73 + phase_y).cos() * amp_y;
+    // Facing: the horizontal velocity at this instant. Cosine of
+    // the x-phase is the derivative's sign.
+    let facing_left = (t + phase_x).cos() < 0.0;
+    (Point::new(offset_x, offset_y), facing_left)
 }
 
 /// Running sprites bob subtly to mark them as busy. Other states

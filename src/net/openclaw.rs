@@ -48,6 +48,7 @@
 //! On any failure the session errors, emits `WsEvent::Disconnected`,
 //! sleeps with exponential backoff capped at 30s, and retries.
 
+use std::pin::Pin;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -91,7 +92,15 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// approve command. 5 minutes is comfortably longer than the
 /// "copy, ssh in, paste" round-trip; the operator can also just
 /// relaunch the desktop to force an immediate retry once approved.
-const SCOPE_UPGRADE_BACKOFF: Duration = Duration::from_secs(300);
+/// Interval between silent retries while a pair-request is pending
+/// (first-pair OR scope-upgrade). Short enough that `openclaw devices
+/// approve …` on the gateway host reflects in the desktop within the
+/// operator's "approve-and-glance" window; long enough that the
+/// gateway's audit log isn't spammed with attempts. Was 5 minutes
+/// until the UX feedback came back as "too long to notice I'd
+/// approved"; retry manually via the Retry-now button still works
+/// and short-circuits this wait via the command channel.
+const SCOPE_UPGRADE_BACKOFF: Duration = Duration::from_secs(15);
 
 /// Milliseconds since the UNIX epoch — the format `signedAtMs` in
 /// the device-auth payload expects. Falls back to zero if the system
@@ -109,23 +118,31 @@ fn chrono_now_ms() -> i64 {
 /// route by the event's `sessionKey` instead.
 const CHAT_AGENT_ID: &str = "main";
 
+/// Stable, hashable bundle that [`connect`] takes as its subscription
+/// input. Its `Hash` impl contributes to the subscription identity,
+/// so changing any field tears down the current WS session and
+/// starts a fresh one. `save_nonce` is bumped on every Settings Save
+/// so re-saving unchanged values still restarts the subscription —
+/// otherwise the operator gets no feedback when they click Save on
+/// values that were already correct.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct ConnectParams {
+    pub gateway_url: String,
+    pub token: Option<String>,
+    pub save_nonce: u64,
+}
+
 /// Iced subscription stream for the real gateway.
 ///
-/// Keep as a free function (not a closure) — Iced's `Subscription::run`
-/// uses the function pointer as subscription identity.
-pub fn connect() -> impl Stream<Item = WsEvent> {
-    stream::channel(64, async move |mut out| {
-        let Some(gateway_url) = config::gateway_url() else {
-            let msg = "OPENCLAW_GATEWAY_URL is not set. Export it (e.g. \
-                       `export OPENCLAW_GATEWAY_URL=wss://gateway.example/`) \
-                       or run with `--mode mock` for the offline fixture. \
-                       See the README for details.";
-            tracing::error!("{msg}");
-            let _ = out.send(WsEvent::Disconnected(msg.to_string())).await;
-            return;
-        };
-        let token = config::try_load_token();
-
+/// Called via `Subscription::run_with(params, openclaw::connect)` so
+/// the `params` argument participates in subscription identity. The
+/// return type is a boxed `Pin<Box<dyn Stream + Send>>` (not
+/// `impl Stream`) because `Subscription::run_with` takes a fn pointer
+/// and fn-pointer coercion requires a nameable return type.
+pub fn connect(params: &ConnectParams) -> Pin<Box<dyn Stream<Item = WsEvent> + Send>> {
+    let gateway_url = params.gateway_url.clone();
+    let token = params.token.clone();
+    Box::pin(stream::channel(64, async move |mut out| {
         let instance_id = config::instance_id().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "instance-id stash failed; using ephemeral");
             uuid::Uuid::new_v4().to_string()
@@ -143,16 +160,15 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
             }
         };
 
-        // Claim the UI→WS command receiver. Single owner — subsequent
-        // reconnects reuse the same receiver across session attempts.
-        // If someone already took it (shouldn't happen on a fresh
-        // process) we substitute a dangling receiver so the session
-        // loop's select arm has something to await without panicking.
-        let mut cmd_rx = commands::take_rx().unwrap_or_else(|| {
-            tracing::warn!("command receiver already claimed; UI → WS commands will no-op");
-            let (_dangling_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            rx
-        });
+        // Claim a live UI→WS command receiver. `take_rx` is guaranteed
+        // to return something live even on subscription restart — if
+        // the receiver was previously consumed it rebuilds the
+        // channel and swaps the static sender so the UI's next
+        // `sender()` clone targets this new receiver. Without that
+        // invariant a dead receiver would make `cmd_rx.recv()` return
+        // `None` instantly, which would collapse every
+        // `wait_or_command` sleep to zero and produce reconnect spam.
+        let mut cmd_rx = commands::take_rx();
 
         let mut backoff = INITIAL_BACKOFF;
 
@@ -171,38 +187,191 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
                     tracing::warn!("session ended cleanly (unexpected); reconnecting");
                     backoff = INITIAL_BACKOFF;
                 }
-                Err(SessionError::ScopeUpgradePending { request_id }) => {
+                Err(SessionError::PairingRequired(req)) => {
+                    let headline = match req.kind {
+                        crate::net::events::PairRequestKind::FirstPair => "device pairing required",
+                        crate::net::events::PairRequestKind::ScopeUpgrade => {
+                            "scope-upgrade pairing required"
+                        }
+                    };
                     tracing::warn!(
-                        %request_id,
-                        "scope-upgrade pairing required — waiting for operator approval",
+                        request_id = %req.request_id,
+                        kind = ?req.kind,
+                        "{headline} — waiting for operator approval",
+                    );
+                    let short_reason = format!(
+                        "awaiting pair approval ({})",
+                        &req.request_id[..req.request_id.len().min(8)]
                     );
                     let _ = out
-                        .send(WsEvent::ScopeUpgradePending(Some(request_id.clone())))
+                        .send(WsEvent::PairRequestPending(Some(req.clone())))
                         .await;
-                    let _ = out
-                        .send(WsEvent::Disconnected(format!(
-                            "awaiting scope-upgrade approval ({request_id})"
-                        )))
-                        .await;
+                    let _ = out.send(WsEvent::Disconnected(short_reason)).await;
                     // Hot-reconnecting re-acknowledges the same
-                    // requestId without progress and spams logs. Wait
-                    // a long human-paced interval — the operator has
-                    // to go run `openclaw devices approve <id>`. Any
-                    // inbound command (practically: the "Retry now"
-                    // button sending `Reconnect`) short-circuits the
-                    // wait so approvals take effect immediately.
+                    // requestId without progress and spams both our
+                    // log and the gateway's. Wait a long human-paced
+                    // interval — the operator has to go run
+                    // `openclaw devices approve <id>` on the gateway
+                    // host. Any inbound command (practically: the
+                    // "Retry now" button sending `Reconnect`)
+                    // short-circuits the wait so approvals take
+                    // effect immediately.
                     wait_or_command(SCOPE_UPGRADE_BACKOFF, &mut cmd_rx).await;
                     continue;
                 }
                 Err(e) => {
+                    // Belt-and-suspenders. If the inline classifier
+                    // inside session() missed a PAIRING_REQUIRED
+                    // payload for any reason (new field shape, etc.),
+                    // the raw JSON still lives inside
+                    // `HandshakeRejected`. Re-parse at the outer
+                    // level before falling into the short-backoff
+                    // reconnect spam — a pair request must always
+                    // route to the long-backoff arm, no matter which
+                    // code path produced the error.
+                    if let SessionError::HandshakeRejected(txt) = &e
+                        && let Ok(v) = serde_json::from_str::<Value>(txt)
+                        && let Some(req) = classify_pair_request(&v)
+                    {
+                        let headline = match req.kind {
+                            crate::net::events::PairRequestKind::FirstPair => {
+                                "device pairing required"
+                            }
+                            crate::net::events::PairRequestKind::ScopeUpgrade => {
+                                "scope-upgrade pairing required"
+                            }
+                        };
+                        tracing::warn!(
+                            request_id = %req.request_id,
+                            kind = ?req.kind,
+                            "{headline} — waiting for operator approval (recovered from outer match)",
+                        );
+                        let short_reason = format!(
+                            "awaiting pair approval ({})",
+                            &req.request_id[..req.request_id.len().min(8)]
+                        );
+                        let _ = out
+                            .send(WsEvent::PairRequestPending(Some(req.clone())))
+                            .await;
+                        let _ = out.send(WsEvent::Disconnected(short_reason)).await;
+                        wait_or_command(SCOPE_UPGRADE_BACKOFF, &mut cmd_rx).await;
+                        continue;
+                    }
+                    // Log the raw error (JSON payloads and all) for
+                    // post-hoc debugging; the UI gets the humanized
+                    // summary so the Settings tab doesn't render a
+                    // wall of protocol internals.
                     tracing::warn!(error = %e, "session errored; reconnecting");
-                    let _ = out.send(WsEvent::Disconnected(e.to_string())).await;
+                    let reason = humanize_disconnect_reason(&e.to_string());
+                    let _ = out.send(WsEvent::Disconnected(reason)).await;
                 }
             }
 
             wait_or_command(backoff, &mut cmd_rx).await;
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
+    }))
+}
+
+/// Collapse a raw `SessionError::Display` string into something
+/// operator-friendly for the Settings tab's status line and the
+/// status-bar's disconnect readout.
+///
+/// The gateway's `handshake rejected: {json…}` form is the big
+/// offender — the full `error.message` + structured details dumped
+/// verbatim looks like a stack trace. We parse the JSON payload and
+/// surface just the human message, preferring the envelope's
+/// `error.message` over the nested `details.code`. Other error
+/// shapes ("connect IO error: …", tungstenite handshake failures)
+/// are already short-ish; we trim and pass them through.
+///
+/// Raw payloads remain available in the Logs tab (the ingest path
+/// at line 207 logs the unprocessed error via `tracing::warn!`
+/// before this function runs).
+fn humanize_disconnect_reason(raw: &str) -> String {
+    // The `HandshakeRejected(String)` variant's Display prepends
+    // "handshake rejected: " to the payload; everything after is
+    // usually a JSON envelope from the gateway.
+    if let Some(json) = raw.strip_prefix("handshake rejected: ")
+        && let Ok(value) = serde_json::from_str::<Value>(json)
+    {
+        let message = value
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str);
+        let detail_code = value
+            .get("error")
+            .and_then(|e| e.get("details"))
+            .and_then(|d| d.get("code"))
+            .and_then(Value::as_str);
+        return match (message, detail_code) {
+            (Some(m), Some(code)) => format!("gateway rejected: {m} [{code}]"),
+            (Some(m), None) => format!("gateway rejected: {m}"),
+            (None, Some(code)) => format!("gateway rejected ({code})"),
+            (None, None) => "gateway rejected the handshake".to_string(),
+        };
+    }
+
+    // Otherwise the raw string is already short-ish ("connect IO
+    // error: Connection refused (os error 61)", "handshake timeout",
+    // etc.). Cap the length as a defensive measure so a weird future
+    // error shape can't blow out the status line's layout.
+    const MAX_LEN: usize = 200;
+    if raw.len() <= MAX_LEN {
+        raw.to_string()
+    } else {
+        let mut cut = MAX_LEN.saturating_sub(1);
+        while cut > 0 && !raw.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…", &raw[..cut])
+    }
+}
+
+/// Inspect the parsed `connect-1` response envelope and, if it's a
+/// pair-request rejection (`details.code == "PAIRING_REQUIRED"`,
+/// `details.requestId` present), produce the [`PairRequest`] the
+/// outer loop hands to `SessionError::PairingRequired`.
+///
+/// Returns `None` for anything that isn't a recognizable pair
+/// request; the caller then falls through to the generic
+/// `HandshakeRejected` path.
+///
+/// Factored out of the `session` loop so it's unit-testable
+/// against frozen gateway payloads — this is the code that decides
+/// whether the reconnect loop stays quiet (pair flow) or churns on
+/// short backoff (transient failure).
+fn classify_pair_request(v: &Value) -> Option<crate::net::events::PairRequest> {
+    use crate::net::events::{PairRequest, PairRequestKind};
+
+    let details = v.get("error").and_then(|e| e.get("details"))?;
+
+    let code = details.get("code").and_then(Value::as_str)?;
+    if code != "PAIRING_REQUIRED" {
+        return None;
+    }
+
+    let request_id = details.get("requestId").and_then(Value::as_str)?;
+    let reason = details.get("reason").and_then(Value::as_str);
+    let device_id = details
+        .get("deviceId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let remediation_hint = details
+        .get("remediationHint")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let kind = match reason {
+        Some("scope-upgrade") => PairRequestKind::ScopeUpgrade,
+        _ => PairRequestKind::FirstPair,
+    };
+
+    Some(PairRequest {
+        request_id: request_id.to_string(),
+        device_id,
+        remediation_hint,
+        kind,
     })
 }
 
@@ -231,13 +400,16 @@ enum SessionError {
     Connect(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("handshake rejected: {0}")]
     HandshakeRejected(String),
-    /// Gateway filed a pair-request to expand scopes; operator must
-    /// approve via `openclaw devices approve <request_id>` before
-    /// this connection can succeed. Carried separately so the
-    /// reconnect loop can back off far longer than a transient
-    /// network failure.
-    #[error("scope-upgrade pairing required (request {request_id})")]
-    ScopeUpgradePending { request_id: String },
+    /// Gateway filed a pair-request; operator must approve via
+    /// `openclaw devices approve <request_id>` before this
+    /// connection can succeed. Covers both the initial-pair case
+    /// (`reason: not-paired`) and the scope-upgrade case
+    /// (`reason: scope-upgrade`). Carried separately so the
+    /// reconnect loop can back off long — retry-spam is pointless
+    /// while a human decision is pending, and floods both our log
+    /// and the gateway's.
+    #[error("pairing required (request {})", .0.request_id)]
+    PairingRequired(crate::net::events::PairRequest),
     #[error("handshake timeout")]
     HandshakeTimeout,
     #[error("socket closed")]
@@ -350,7 +522,7 @@ async fn session(
         "maxProtocol": 3,
         "client": {
             "id": client_id,
-            "displayName": "Periclaw",
+            "displayName": "PeriClaw",
             "version": env!("CARGO_PKG_VERSION"),
             "platform": std::env::consts::OS,
             "mode": client_mode,
@@ -449,39 +621,23 @@ async fn session(
                                     "gateway connect accepted",
                                 );
                                 // Hand a successful connect to the UI
-                                // and clear any lingering scope-upgrade
-                                // notice.
-                                let _ = out.send(WsEvent::ScopeUpgradePending(None)).await;
+                                // and clear any lingering pair-request
+                                // notice (initial pair or scope upgrade).
+                                let _ = out.send(WsEvent::PairRequestPending(None)).await;
                                 let _ = out.send(WsEvent::Connected).await;
                                 break;
                             }
-                            // Scope-upgrade pair requests are distinct
-                            // from generic handshake failures: the
-                            // gateway will keep rejecting us until the
-                            // operator approves the pair-request, so
-                            // fast reconnection is pointless and would
-                            // flood logs. Tag the error variant so the
-                            // outer loop backs off long and the UI can
-                            // show the requestId.
-                            let details = v
-                                .get("error")
-                                .and_then(|e| e.get("details"));
-                            let err_code = details
-                                .and_then(|d| d.get("code"))
-                                .and_then(Value::as_str);
-                            let reason = details
-                                .and_then(|d| d.get("reason"))
-                                .and_then(Value::as_str);
-                            let request_id = details
-                                .and_then(|d| d.get("requestId"))
-                                .and_then(Value::as_str);
-                            if err_code == Some("PAIRING_REQUIRED")
-                                && reason == Some("scope-upgrade")
-                                && let Some(rid) = request_id
-                            {
-                                return Err(SessionError::ScopeUpgradePending {
-                                    request_id: rid.to_string(),
-                                });
+                            // Pair-requests (initial pair AND scope
+                            // upgrade) are distinct from generic
+                            // handshake failures: the gateway will
+                            // keep rejecting us until the operator
+                            // approves out-of-band, so fast
+                            // reconnection is pointless and would
+                            // flood both logs. The detection is
+                            // factored out so it's unit-testable
+                            // against frozen gateway payloads.
+                            if let Some(req) = classify_pair_request(&v) {
+                                return Err(SessionError::PairingRequired(req));
                             }
                             return Err(SessionError::HandshakeRejected(txt.to_string()));
                         }
@@ -1684,6 +1840,126 @@ mod command_rpc_tests {
         assert_eq!(agent_id_from_session_key("main"), None);
         assert_eq!(agent_id_from_session_key("agent::main"), None);
         assert_eq!(agent_id_from_session_key("agent:onlyid"), None);
+    }
+
+    #[test]
+    fn humanizer_parses_handshake_rejection_payload() {
+        // Shape emitted by the gateway on auth rate-limit — the exact
+        // string that was flooding the Settings tab before the humanizer.
+        let raw = r#"handshake rejected: {"type":"res","id":"connect-1","ok":false,"error":{"code":"INVALID_REQUEST","message":"unauthorized: too many failed authentication attempts (retry later)","details":{"code":"AUTH_RATE_LIMITED","authReason":"rate_limited"}}}"#;
+        let out = humanize_disconnect_reason(raw);
+        assert_eq!(
+            out,
+            "gateway rejected: unauthorized: too many failed authentication attempts (retry later) [AUTH_RATE_LIMITED]",
+        );
+    }
+
+    #[test]
+    fn humanizer_falls_through_for_non_json_errors() {
+        // IO errors already read cleanly enough; pass through unchanged.
+        let raw = "connect IO error: Connection refused (os error 61)";
+        assert_eq!(humanize_disconnect_reason(raw), raw);
+    }
+
+    #[test]
+    fn humanizer_caps_arbitrarily_long_strings() {
+        // Defensive: a future error format with an enormous payload
+        // mustn't blow out the status line's layout. Cap is MAX_LEN
+        // (200) content chars plus a trailing ellipsis; UTF-8 ellipsis
+        // is 3 bytes, so the byte length lands at ~202.
+        let raw = "x".repeat(500);
+        let out = humanize_disconnect_reason(&raw);
+        assert!(out.len() < 210, "got {} bytes", out.len());
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn classify_pair_request_recognizes_initial_pair_payload() {
+        // Exact shape produced by the gateway on first-launch against
+        // an unpaired device — reproduced from the log the user
+        // captured while the reconnect loop was spamming.
+        let raw = r#"{
+            "type":"res",
+            "id":"connect-1",
+            "ok":false,
+            "error":{
+                "code":"NOT_PAIRED",
+                "message":"pairing required: device is not approved yet",
+                "details":{
+                    "code":"PAIRING_REQUIRED",
+                    "reason":"not-paired",
+                    "requestId":"f81162f1-0d40-401f-86d8-49a2c976b879",
+                    "remediationHint":"Remove this device from the pending pairing requests.",
+                    "deviceId":"702497c00b8b930951e809992ac10dc8289db179a7894a18b5a241b53b07d2fc",
+                    "requestedRole":"operator",
+                    "requestedScopes":["operator.read","operator.approvals","operator.admin"]
+                }
+            }
+        }"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        let req = classify_pair_request(&v).expect("must match PAIRING_REQUIRED");
+        assert_eq!(req.request_id, "f81162f1-0d40-401f-86d8-49a2c976b879");
+        assert_eq!(
+            req.device_id.as_deref(),
+            Some("702497c00b8b930951e809992ac10dc8289db179a7894a18b5a241b53b07d2fc"),
+        );
+        assert_eq!(
+            req.remediation_hint.as_deref(),
+            Some("Remove this device from the pending pairing requests."),
+        );
+        assert_eq!(req.kind, crate::net::events::PairRequestKind::FirstPair);
+    }
+
+    #[test]
+    fn classify_pair_request_recognizes_scope_upgrade() {
+        let raw = r#"{
+            "type":"res","id":"connect-1","ok":false,
+            "error":{"code":"INVALID_REQUEST","details":{
+                "code":"PAIRING_REQUIRED","reason":"scope-upgrade","requestId":"req-abc"
+            }}
+        }"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        let req = classify_pair_request(&v).expect("must match");
+        assert_eq!(req.kind, crate::net::events::PairRequestKind::ScopeUpgrade);
+        assert_eq!(req.request_id, "req-abc");
+    }
+
+    #[test]
+    fn classify_pair_request_returns_none_for_other_failures() {
+        // AUTH_RATE_LIMITED (different details.code) should fall through
+        // to the normal HandshakeRejected path, not be mistaken for a
+        // pair request.
+        let raw = r#"{
+            "type":"res","id":"connect-1","ok":false,
+            "error":{"code":"INVALID_REQUEST","details":{
+                "code":"AUTH_RATE_LIMITED","authReason":"rate_limited"
+            }}
+        }"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        assert!(classify_pair_request(&v).is_none());
+    }
+
+    #[test]
+    fn classify_pair_request_requires_request_id() {
+        // Without a requestId the operator has nothing to approve,
+        // so we fall through rather than emitting an unusable notice.
+        let raw = r#"{
+            "type":"res","id":"connect-1","ok":false,
+            "error":{"details":{"code":"PAIRING_REQUIRED","reason":"not-paired"}}
+        }"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        assert!(classify_pair_request(&v).is_none());
+    }
+
+    #[test]
+    fn humanizer_handles_rejected_payload_missing_message() {
+        // If the gateway ever sends a rejection with only a code and
+        // no message, we still produce something readable.
+        let raw = r#"handshake rejected: {"error":{"details":{"code":"UNKNOWN_CLIENT"}}}"#;
+        assert_eq!(
+            humanize_disconnect_reason(raw),
+            "gateway rejected (UNKNOWN_CLIENT)",
+        );
     }
 
     #[test]

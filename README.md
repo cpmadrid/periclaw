@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="logo.png" alt="Periclaw logo" width="200" />
+  <img src="logo.png" alt="PeriClaw logo" width="200" />
 </p>
 
-# Periclaw
+# PeriClaw
 
 Native Rust desktop app — a pixel-art "Agent Office" visualization of an OpenClaw AI agent farm. Octopus sprites in themed rooms, thought bubbles on state transitions, a real-time WebSocket connection to the OpenClaw gateway.
 

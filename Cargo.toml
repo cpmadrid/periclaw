@@ -45,6 +45,26 @@ notify-rust = "4"
 # only accepts raw RGBA bytes, so we decode `logo.png` at startup.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Bundle metadata consumed by `cargo bundle` (installed separately
+# via `cargo install cargo-bundle`). `./dev run` invokes cargo bundle
+# on macOS so the running binary is a real `.app` — required for the
+# dock icon, proper LaunchServices bundle identifier (no more
+# "use_default" dialog), and Cmd-Tab label. Ship-time concerns like
+# signing/notarization aren't set up yet; until then the bundle is
+# usable for local launch but not distribution.
+[package.metadata.bundle]
+name = "PeriClaw"
+identifier = "com.cpmadrid.periclaw"
+icon = ["assets/icon.icns"]
+category = "public.app-category.developer-tools"
+short_description = "Pixel-art Agent Office desktop visualization of OpenClaw AI agents."
+long_description = """
+PeriClaw is a native Rust/Iced desktop client for an OpenClaw AI \
+agent farm — pixel-art office scene with sprite animations, \
+multi-agent chat, operator-driven cron runs and session resets, \
+approval flow, persistent UI state across restarts.
+"""
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

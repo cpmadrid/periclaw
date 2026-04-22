@@ -63,7 +63,7 @@ pub static BORDER: LazyLock<Color> = LazyLock::new(|| oklch_a(0.55, 0.15, 155.0,
 /// Build the Iced custom theme for the app.
 pub fn periclaw_theme() -> iced::Theme {
     iced::Theme::custom(
-        "Periclaw".to_string(),
+        "PeriClaw".to_string(),
         iced::theme::Palette {
             background: *SURFACE_0,
             text: *FOREGROUND,

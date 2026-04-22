@@ -75,8 +75,24 @@ if [[ "$BUILD_TYPE" == "release" ]]; then
     cargo_args+=(--release)
 fi
 
-# Decide what to launch (cargo run vs. pre-built binary) as an array
-# so redirection can wrap it uniformly below.
+# macOS: prefer launching the real `.app` bundle so the dock, Cmd-Tab,
+# and LaunchServices all see PeriClaw as a proper app — notifications
+# attribute correctly, the dock icon is our logo, the window titlebar
+# reads PeriClaw. Requires `cargo bundle` (install via `cargo install
+# cargo-bundle` once). Set `NO_BUNDLE=1` to skip the bundle step for
+# a faster iteration loop when you just need `cargo run`.
+#
+# Decision tree:
+#   - NO_BUILD=true → exec pre-built raw binary (no bundle step).
+#   - NO_BUNDLE=1 on macOS → plain `cargo run` (Rust default icon).
+#   - macOS default → `cargo bundle` then `open target/.../PeriClaw.app`.
+#   - Other OS → plain `cargo run`.
+NO_BUNDLE="${NO_BUNDLE:-false}"
+is_macos=false
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    is_macos=true
+fi
+
 if [[ "$NO_BUILD" == "true" ]]; then
     case "$BUILD_TYPE" in
         release) bin_path="${RELEASE_BUILD_DIR}/${APP_EXECUTABLE}" ;;
@@ -87,6 +103,28 @@ if [[ "$NO_BUILD" == "true" ]]; then
         exit 1
     fi
     launch=("${doppler_prefix[@]}" "$bin_path")
+elif [[ "$is_macos" == "true" && "$NO_BUNDLE" != "1" && "$NO_BUNDLE" != "true" ]]; then
+    if ! command -v cargo-bundle >/dev/null 2>&1; then
+        print_error "cargo-bundle not installed — run \`cargo install cargo-bundle\` or set NO_BUNDLE=1"
+        exit 1
+    fi
+    bundle_format=(--format osx)
+    bundle_flags=()
+    if [[ "$BUILD_TYPE" == "release" ]]; then
+        bundle_flags+=(--release)
+    fi
+    print_step "cargo bundle ${bundle_format[*]} ${bundle_flags[*]}"
+    cargo bundle "${bundle_format[@]}" "${bundle_flags[@]}"
+    # cargo-bundle names the output `<App>.app` where <App> is the
+    # `name` from `[package.metadata.bundle]`. Our bundle name has
+    # the camelCase display form.
+    app_dir="target/${BUILD_TYPE}/bundle/osx/PeriClaw.app"
+    if [[ ! -d "$app_dir" ]]; then
+        print_error "expected ${app_dir} after cargo bundle, not found"
+        exit 1
+    fi
+    bundle_bin="${app_dir}/Contents/MacOS/${APP_EXECUTABLE}"
+    launch=("${doppler_prefix[@]}" "$bundle_bin")
 else
     launch=("${doppler_prefix[@]}" cargo "${cargo_args[@]}")
 fi
