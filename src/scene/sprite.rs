@@ -157,7 +157,7 @@ pub const MICROPHONE: Sprite = Sprite {
 // char-grid renderer; lobsters use image.
 // =====================================================================
 
-static LOBSTER_IDLE: LazyLock<[iced_image::Handle; 4]> = LazyLock::new(|| {
+static LOBSTER_IDLE: LazyLock<[iced_image::Handle; 7]> = LazyLock::new(|| {
     [
         iced_image::Handle::from_bytes(
             include_bytes!("../../assets/lobster/idle-0.png").as_slice(),
@@ -171,10 +171,19 @@ static LOBSTER_IDLE: LazyLock<[iced_image::Handle; 4]> = LazyLock::new(|| {
         iced_image::Handle::from_bytes(
             include_bytes!("../../assets/lobster/idle-3.png").as_slice(),
         ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/idle-4.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/idle-5.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/idle-6.png").as_slice(),
+        ),
     ]
 });
 
-static LOBSTER_WALK: LazyLock<[iced_image::Handle; 4]> = LazyLock::new(|| {
+static LOBSTER_WALK: LazyLock<[iced_image::Handle; 8]> = LazyLock::new(|| {
     [
         iced_image::Handle::from_bytes(
             include_bytes!("../../assets/lobster/walk-0.png").as_slice(),
@@ -187,6 +196,18 @@ static LOBSTER_WALK: LazyLock<[iced_image::Handle; 4]> = LazyLock::new(|| {
         ),
         iced_image::Handle::from_bytes(
             include_bytes!("../../assets/lobster/walk-3.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/walk-4.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/walk-5.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/walk-6.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/walk-7.png").as_slice(),
         ),
     ]
 });
@@ -214,12 +235,14 @@ pub fn draw_lobster(
     seconds: f32,
     flip_h: bool,
 ) {
-    let (frames, hz): (&[iced_image::Handle; 4], f32) = match status {
-        AgentStatus::Running | AgentStatus::Unknown => (&LOBSTER_WALK, 4.0),
-        AgentStatus::Ok => (&LOBSTER_IDLE, 2.0),
-        AgentStatus::Error | AgentStatus::Disabled => (&LOBSTER_IDLE, 0.0),
+    // Slice refs so we can pick the idle vs walk array without
+    // caring about the fixed-size difference between them.
+    let (frames, hz): (&[iced_image::Handle], f32) = match status {
+        AgentStatus::Running | AgentStatus::Unknown => (LOBSTER_WALK.as_slice(), 6.0),
+        AgentStatus::Ok => (LOBSTER_IDLE.as_slice(), 3.0),
+        AgentStatus::Error | AgentStatus::Disabled => (LOBSTER_IDLE.as_slice(), 0.0),
     };
-    let idx = if hz <= 0.0 {
+    let idx = if hz <= 0.0 || frames.is_empty() {
         0
     } else {
         let phase = (seconds * hz).rem_euclid(frames.len() as f32) as usize;
