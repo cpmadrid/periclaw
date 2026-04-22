@@ -213,6 +213,43 @@ pub fn connect(params: &ConnectParams) -> Pin<Box<dyn Stream<Item = WsEvent> + S
                     continue;
                 }
                 Err(e) => {
+                    // Belt-and-suspenders. If the inline classifier
+                    // inside session() missed a PAIRING_REQUIRED
+                    // payload for any reason (new field shape, etc.),
+                    // the raw JSON still lives inside
+                    // `HandshakeRejected`. Re-parse at the outer
+                    // level before falling into the short-backoff
+                    // reconnect spam — a pair request must always
+                    // route to the long-backoff arm, no matter which
+                    // code path produced the error.
+                    if let SessionError::HandshakeRejected(txt) = &e
+                        && let Ok(v) = serde_json::from_str::<Value>(txt)
+                        && let Some(req) = classify_pair_request(&v)
+                    {
+                        let headline = match req.kind {
+                            crate::net::events::PairRequestKind::FirstPair => {
+                                "device pairing required"
+                            }
+                            crate::net::events::PairRequestKind::ScopeUpgrade => {
+                                "scope-upgrade pairing required"
+                            }
+                        };
+                        tracing::warn!(
+                            request_id = %req.request_id,
+                            kind = ?req.kind,
+                            "{headline} — waiting for operator approval (recovered from outer match)",
+                        );
+                        let short_reason = format!(
+                            "awaiting pair approval ({})",
+                            &req.request_id[..req.request_id.len().min(8)]
+                        );
+                        let _ = out
+                            .send(WsEvent::PairRequestPending(Some(req.clone())))
+                            .await;
+                        let _ = out.send(WsEvent::Disconnected(short_reason)).await;
+                        wait_or_command(SCOPE_UPGRADE_BACKOFF, &mut cmd_rx).await;
+                        continue;
+                    }
                     // Log the raw error (JSON payloads and all) for
                     // post-hoc debugging; the UI gets the humanized
                     // summary so the Settings tab doesn't render a
