@@ -284,6 +284,53 @@ fn humanize_disconnect_reason(raw: &str) -> String {
     }
 }
 
+/// Inspect the parsed `connect-1` response envelope and, if it's a
+/// pair-request rejection (`details.code == "PAIRING_REQUIRED"`,
+/// `details.requestId` present), produce the [`PairRequest`] the
+/// outer loop hands to `SessionError::PairingRequired`.
+///
+/// Returns `None` for anything that isn't a recognizable pair
+/// request; the caller then falls through to the generic
+/// `HandshakeRejected` path.
+///
+/// Factored out of the `session` loop so it's unit-testable
+/// against frozen gateway payloads — this is the code that decides
+/// whether the reconnect loop stays quiet (pair flow) or churns on
+/// short backoff (transient failure).
+fn classify_pair_request(v: &Value) -> Option<crate::net::events::PairRequest> {
+    use crate::net::events::{PairRequest, PairRequestKind};
+
+    let details = v.get("error").and_then(|e| e.get("details"))?;
+
+    let code = details.get("code").and_then(Value::as_str)?;
+    if code != "PAIRING_REQUIRED" {
+        return None;
+    }
+
+    let request_id = details.get("requestId").and_then(Value::as_str)?;
+    let reason = details.get("reason").and_then(Value::as_str);
+    let device_id = details
+        .get("deviceId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let remediation_hint = details
+        .get("remediationHint")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let kind = match reason {
+        Some("scope-upgrade") => PairRequestKind::ScopeUpgrade,
+        _ => PairRequestKind::FirstPair,
+    };
+
+    Some(PairRequest {
+        request_id: request_id.to_string(),
+        device_id,
+        remediation_hint,
+        kind,
+    })
+}
+
 /// Map a `ws://` / `wss://` gateway URL onto the matching HTTP origin
 /// (`http://` / `https://`, scheme + authority). Returns `None` for
 /// URLs that aren't WebSocket — the caller falls back to letting the
@@ -542,44 +589,11 @@ async fn session(
                             // keep rejecting us until the operator
                             // approves out-of-band, so fast
                             // reconnection is pointless and would
-                            // flood both logs. Tag the error variant
-                            // so the outer loop backs off long and
-                            // the UI can surface the approve command.
-                            let details = v.get("error").and_then(|e| e.get("details"));
-                            let err_code = details
-                                .and_then(|d| d.get("code"))
-                                .and_then(Value::as_str);
-                            let reason = details
-                                .and_then(|d| d.get("reason"))
-                                .and_then(Value::as_str);
-                            let request_id = details
-                                .and_then(|d| d.get("requestId"))
-                                .and_then(Value::as_str);
-                            if err_code == Some("PAIRING_REQUIRED")
-                                && let Some(rid) = request_id
-                            {
-                                let device_id = details
-                                    .and_then(|d| d.get("deviceId"))
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string);
-                                let remediation_hint = details
-                                    .and_then(|d| d.get("remediationHint"))
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string);
-                                let kind = match reason {
-                                    Some("scope-upgrade") => {
-                                        crate::net::events::PairRequestKind::ScopeUpgrade
-                                    }
-                                    _ => crate::net::events::PairRequestKind::FirstPair,
-                                };
-                                return Err(SessionError::PairingRequired(
-                                    crate::net::events::PairRequest {
-                                        request_id: rid.to_string(),
-                                        device_id,
-                                        remediation_hint,
-                                        kind,
-                                    },
-                                ));
+                            // flood both logs. The detection is
+                            // factored out so it's unit-testable
+                            // against frozen gateway payloads.
+                            if let Some(req) = classify_pair_request(&v) {
+                                return Err(SessionError::PairingRequired(req));
                             }
                             return Err(SessionError::HandshakeRejected(txt.to_string()));
                         }
@@ -1813,6 +1827,84 @@ mod command_rpc_tests {
         let out = humanize_disconnect_reason(&raw);
         assert!(out.len() < 210, "got {} bytes", out.len());
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn classify_pair_request_recognizes_initial_pair_payload() {
+        // Exact shape produced by the gateway on first-launch against
+        // an unpaired device — reproduced from the log the user
+        // captured while the reconnect loop was spamming.
+        let raw = r#"{
+            "type":"res",
+            "id":"connect-1",
+            "ok":false,
+            "error":{
+                "code":"NOT_PAIRED",
+                "message":"pairing required: device is not approved yet",
+                "details":{
+                    "code":"PAIRING_REQUIRED",
+                    "reason":"not-paired",
+                    "requestId":"f81162f1-0d40-401f-86d8-49a2c976b879",
+                    "remediationHint":"Remove this device from the pending pairing requests.",
+                    "deviceId":"702497c00b8b930951e809992ac10dc8289db179a7894a18b5a241b53b07d2fc",
+                    "requestedRole":"operator",
+                    "requestedScopes":["operator.read","operator.approvals","operator.admin"]
+                }
+            }
+        }"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        let req = classify_pair_request(&v).expect("must match PAIRING_REQUIRED");
+        assert_eq!(req.request_id, "f81162f1-0d40-401f-86d8-49a2c976b879");
+        assert_eq!(
+            req.device_id.as_deref(),
+            Some("702497c00b8b930951e809992ac10dc8289db179a7894a18b5a241b53b07d2fc"),
+        );
+        assert_eq!(
+            req.remediation_hint.as_deref(),
+            Some("Remove this device from the pending pairing requests."),
+        );
+        assert_eq!(req.kind, crate::net::events::PairRequestKind::FirstPair);
+    }
+
+    #[test]
+    fn classify_pair_request_recognizes_scope_upgrade() {
+        let raw = r#"{
+            "type":"res","id":"connect-1","ok":false,
+            "error":{"code":"INVALID_REQUEST","details":{
+                "code":"PAIRING_REQUIRED","reason":"scope-upgrade","requestId":"req-abc"
+            }}
+        }"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        let req = classify_pair_request(&v).expect("must match");
+        assert_eq!(req.kind, crate::net::events::PairRequestKind::ScopeUpgrade);
+        assert_eq!(req.request_id, "req-abc");
+    }
+
+    #[test]
+    fn classify_pair_request_returns_none_for_other_failures() {
+        // AUTH_RATE_LIMITED (different details.code) should fall through
+        // to the normal HandshakeRejected path, not be mistaken for a
+        // pair request.
+        let raw = r#"{
+            "type":"res","id":"connect-1","ok":false,
+            "error":{"code":"INVALID_REQUEST","details":{
+                "code":"AUTH_RATE_LIMITED","authReason":"rate_limited"
+            }}
+        }"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        assert!(classify_pair_request(&v).is_none());
+    }
+
+    #[test]
+    fn classify_pair_request_requires_request_id() {
+        // Without a requestId the operator has nothing to approve,
+        // so we fall through rather than emitting an unusable notice.
+        let raw = r#"{
+            "type":"res","id":"connect-1","ok":false,
+            "error":{"details":{"code":"PAIRING_REQUIRED","reason":"not-paired"}}
+        }"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        assert!(classify_pair_request(&v).is_none());
     }
 
     #[test]
