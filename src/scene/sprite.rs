@@ -134,90 +134,67 @@ pub const MICROPHONE: Sprite = Sprite {
     ]],
 };
 
-/// Classic Pac-Man ghost — dome with wavy bottom, big friendly eyes.
-/// Two frames: the wavy bottom pattern shifts by one cell between
-/// frames, so cycling them reads as the ghost "floating" across the
-/// floor. Used for cron agents; the hue comes from each cron's
-/// ghost-palette pick so five running crons look like a ghost posse.
-pub const GHOST: Sprite = Sprite {
-    frames: &[
-        &[
-            "....XXXXXX....",
-            "..XXXXXXXXXX..",
-            ".XXXXXXXXXXXX.",
-            ".XXWWXXXXWWXX.",
-            "XXXWKXXXXWKXXX",
-            "XXXWWXXXXWWXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XX.XX.XX.XX.XX",
-            "X...X...X...X.",
-        ],
-        &[
-            "....XXXXXX....",
-            "..XXXXXXXXXX..",
-            ".XXXXXXXXXXXX.",
-            ".XXWWXXXXWWXX.",
-            "XXXWKXXXXWKXXX",
-            "XXXWWXXXXWWXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            "XXXXXXXXXXXXXX",
-            ".XX.XX.XX.XX.X",
-            "X...X...X...X.",
-        ],
-    ],
-};
-
-/// Rounded humanoid — a head + body figure. Two frames:
-/// - frame 0: legs even, arms relaxed
-/// - frame 1: legs staggered, arms slightly bent — reads as a step
+/// Space Lobster — PeriClaw's mascot sprite. Top-down view with two
+/// raised claws, segmented body, fan tail, and three leg pairs on
+/// each side. Three frames total:
+///   - frame 0: relaxed — legs spread, tail open
+///   - frame 1: step-left — legs shift left, claws wider
+///   - frame 2: step-right — legs shift right, claws narrower
 ///
-/// Used for `Main` (chat-capable) agents; the primary color is the
-/// agent's signature hue so Sebastian reads as a bright-green
-/// terminal figure, other personas in their own shade.
-pub const HUMANOID: Sprite = Sprite {
+/// Cycling 0→1→0→2 at a slow Hz reads as a patient scuttle.
+///
+/// Palette roles:
+///   X primary (shell color — green by default, operator-configurable)
+///   x primary-dim (underbody shading)
+///   W light (eye highlights, claw tip gleam)
+///   K dark outline (eyes, joints)
+///
+/// Used for every agent and job sprite. Color is picked from the
+/// agent's theme at draw time so the same template can paint a
+/// green Sebastian or a red cron without duplicating the shape.
+pub const LOBSTER: Sprite = Sprite {
     frames: &[
+        // Frame 0 — idle / neutral pose
         &[
-            "....XXXXXX....",
-            "...XXXXXXXX...",
-            "..XXXWKXXWKXX.",
-            "..XXXWWXXWWXX.",
-            "..XXXXXXXXXXX.",
-            "...XXXXXXXXX..",
-            "....XXXXXXX...",
-            "..XXXXXXXXXXX.",
-            ".XXXXXXXXXXXXX",
-            "XXxxXXXXXXxxXX",
-            "XXxxXXXXXXxxXX",
-            ".xxxXXXXXXxxx.",
-            "....XXXXXX....",
-            "...XX....XX...",
-            "...XX....XX...",
-            "..xxx....xxx..",
-        ],
-        &[
-            "....XXXXXX....",
-            "...XXXXXXXX...",
-            "..XXXWKXXWKXX.",
-            "..XXXWWXXWWXX.",
-            "..XXXXXXXXXXX.",
-            "...XXXXXXXXX..",
-            "....XXXXXXX...",
-            "..XXXXXXXXXXX.",
+            "..K........K..",
+            "..X........X..",
+            "..X........X..",
+            ".XXX......XXX.",
+            "XXWXX.KK.XXWXX",
             "XXXXXXXXXXXXXX",
-            "Xxxx.XXXXxxxx.",
-            "Xxxx.XXXXxxxx.",
-            ".xxx.XXXX.xxx.",
-            "....XXXXXX....",
-            "...XX....XX...",
-            "...XX.....XX..",
-            "..xxx.....xxx.",
+            ".XXXXXXXXXXXX.",
+            "XX.XXXXXXXX.XX",
+            "X..X..XX..X..X",
+            "...XXXXXXXX...",
+            "....xXXXXx....",
+        ],
+        // Frame 1 — step-left: legs slide left, left claw reaches
+        &[
+            ".K.........K..",
+            ".X.........X..",
+            ".X.........X..",
+            "XXX.......XXX.",
+            "XXWX..KK..XWXX",
+            "XXXXXXXXXXXXXX",
+            ".XXXXXXXXXXXX.",
+            "XX.XXXXXXXX.XX",
+            ".X..XX..X..X.X",
+            "...XXXXXXXX...",
+            "...xXXXXx.....",
+        ],
+        // Frame 2 — step-right: legs slide right, right claw reaches
+        &[
+            "..K.........K.",
+            "..X.........X.",
+            "..X.........X.",
+            ".XXX.......XXX",
+            "XXWX..KK..XWXX",
+            "XXXXXXXXXXXXXX",
+            ".XXXXXXXXXXXX.",
+            "XX.XXXXXXXX.XX",
+            "X.X..X..XX..X.",
+            "...XXXXXXXX...",
+            ".....xXXXXx...",
         ],
     ],
 };
@@ -257,14 +234,15 @@ pub fn decor_for_room(room: crate::domain::RoomId) -> Option<&'static Sprite> {
     })
 }
 
-/// Pick the template for an agent. Main agents get the humanoid,
-/// crons get the ghost, channels get the monitor. Distinct silhouettes
-/// at a glance — the operator can tell three crons + two channels
-/// apart from two chat-capable agents without reading labels.
+/// Pick the template for an agent. Main and cron both render as
+/// space lobsters — the idea is that crons are jobs the main lobster
+/// handles, so visually the office is a colony of lobsters at
+/// different workstations. Channel providers still render as CRT
+/// monitors until the agent/job split lands and channels move out
+/// of the scene entirely.
 pub fn sprite_for(agent: &Agent) -> &'static Sprite {
     match agent.kind {
-        AgentKind::Main => &HUMANOID,
-        AgentKind::Cron => &GHOST,
+        AgentKind::Main | AgentKind::Cron => &LOBSTER,
         AgentKind::Channel => &MONITOR,
     }
 }
@@ -417,8 +395,7 @@ mod tests {
         // render; a short frame would pop the sprite shorter on
         // alternate ticks.
         for sprite in [
-            &GHOST,
-            &HUMANOID,
+            &LOBSTER,
             &MONITOR,
             &TELESCOPE,
             &CONSOLE,
@@ -447,36 +424,40 @@ mod tests {
     #[test]
     fn frame_phase_cycles_through_all_frames() {
         // `hz` reads as "frames per second" — at 2 Hz, each frame
-        // lasts 0.5 s, so a 2-frame sprite is on frame 0 during
-        // [0, 0.5) and on frame 1 during [0.5, 1.0), then wraps.
+        // lasts 0.5 s. The lobster is 3 frames, so t=0→frame 0,
+        // t=0.5→frame 1, t=1.0→frame 2, t=1.5→frame 0 again.
         assert!(std::ptr::eq(
-            GHOST.frame(0.0, 2.0).as_ptr(),
-            GHOST.frames[0].as_ptr()
+            LOBSTER.frame(0.0, 2.0).as_ptr(),
+            LOBSTER.frames[0].as_ptr()
         ));
         assert!(std::ptr::eq(
-            GHOST.frame(0.25, 2.0).as_ptr(),
-            GHOST.frames[0].as_ptr()
+            LOBSTER.frame(0.25, 2.0).as_ptr(),
+            LOBSTER.frames[0].as_ptr()
         ));
         assert!(std::ptr::eq(
-            GHOST.frame(0.5, 2.0).as_ptr(),
-            GHOST.frames[1].as_ptr()
+            LOBSTER.frame(0.5, 2.0).as_ptr(),
+            LOBSTER.frames[1].as_ptr()
         ));
         assert!(std::ptr::eq(
-            GHOST.frame(1.0, 2.0).as_ptr(),
-            GHOST.frames[0].as_ptr()
+            LOBSTER.frame(1.0, 2.0).as_ptr(),
+            LOBSTER.frames[2].as_ptr()
+        ));
+        assert!(std::ptr::eq(
+            LOBSTER.frame(1.5, 2.0).as_ptr(),
+            LOBSTER.frames[0].as_ptr()
         ));
         // Hz = 0 pins frame 0 regardless of time (fully static
         // sprites like the monitor use this).
         assert!(std::ptr::eq(
-            GHOST.frame(10.0, 0.0).as_ptr(),
-            GHOST.frames[0].as_ptr()
+            LOBSTER.frame(10.0, 0.0).as_ptr(),
+            LOBSTER.frames[0].as_ptr()
         ));
     }
 
     #[test]
     fn sprite_size_scales() {
-        let s = sprite_size_px(&GHOST, 4.0);
-        assert_eq!(s.width, GHOST.width() as f32 * 4.0);
-        assert_eq!(s.height, GHOST.height() as f32 * 4.0);
+        let s = sprite_size_px(&LOBSTER, 4.0);
+        assert_eq!(s.width, LOBSTER.width() as f32 * 4.0);
+        assert_eq!(s.height, LOBSTER.height() as f32 * 4.0);
     }
 }
