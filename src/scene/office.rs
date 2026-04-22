@@ -62,15 +62,34 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                 per_room.entry(room_id).or_default().push(agent);
             }
 
-            // Is any job routed to this room currently Running? We
-            // don't render jobs themselves, but Running state drives
-            // the power-up overlay on the agent in that room.
-            let running_rooms: std::collections::HashSet<&str> = self
+            // Which rooms have any kind of activity right now? We
+            // don't render jobs themselves, but a running job in an
+            // agent's room — OR the agent itself being Running (chat
+            // prompt in flight, tool call, etc.) — lights the power-
+            // up sparkle over that agent.
+            let mut running_rooms: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            if self
                 .jobs
                 .values()
-                .filter(|j| matches!(j.status, AgentStatus::Running))
-                .map(|_j| MAIN_ROOM)
-                .collect();
+                .any(|j| matches!(j.status, AgentStatus::Running))
+            {
+                // Jobs have no explicit per-room assignment yet —
+                // treat them all as routed to MAIN_ROOM (where
+                // Sebastian lives) until the user wires up job_rooms.
+                running_rooms.insert(MAIN_ROOM);
+            }
+            for agent in self.roster {
+                if matches!(
+                    self.statuses
+                        .get(&agent.id)
+                        .copied()
+                        .unwrap_or(AgentStatus::Unknown),
+                    AgentStatus::Running,
+                ) {
+                    running_rooms.insert(resolve_agent_room(agent, self.agent_rooms));
+                }
+            }
 
             let now = Instant::now();
             let seconds = clock_phase(now);
