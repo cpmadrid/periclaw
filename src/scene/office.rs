@@ -86,8 +86,15 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                     // slot. Running adds a vertical bob on top of the
                     // base position (stays where they're working).
                     // Errored/Disabled stay anchored to their slot.
-                    let (wander, facing_left) =
-                        wander_offset(&agent.id, &room_rect, seconds, status);
+                    let sprite_half = sprite_half_size(agent.kind);
+                    let (wander, facing_left) = wander_offset(
+                        &agent.id,
+                        &room_rect,
+                        base_pos,
+                        sprite_half,
+                        seconds,
+                        status,
+                    );
                     let wander_pos = Point::new(base_pos.x + wander.x, base_pos.y + wander.y);
                     let pos = animated_position(wander_pos, status, now);
                     draw_sprite(frame, pos, agent, status, flash, seconds, facing_left);
@@ -350,21 +357,52 @@ fn draw_sprite(
 /// Returns the (x, y) offset from base plus a `facing_left` flag
 /// derived from the horizontal-velocity sign so the sprite flips
 /// when moving right-to-left.
+/// Sprite half-size, used by the wander clamp. `draw_sprite` picks
+/// the template by kind; wander_offset needs the same per-kind box
+/// so it can guarantee the rendered sprite never crosses a room
+/// edge. Kept in sync by convention — any new AgentKind that grows
+/// a wandering sprite needs an entry here.
+fn sprite_half_size(kind: crate::domain::AgentKind) -> Size {
+    use crate::domain::AgentKind;
+    use crate::scene::sprite::{self, DEFAULT_SCALE, LOBSTER_SIZE};
+    let full = match kind {
+        AgentKind::Main | AgentKind::Cron => LOBSTER_SIZE,
+        AgentKind::Channel => sprite::sprite_size_px(&sprite::MONITOR, DEFAULT_SCALE),
+    };
+    Size::new(full.width / 2.0, full.height / 2.0)
+}
+
 fn wander_offset(
     agent_id: &AgentId,
     room_rect: &Rectangle,
+    base_pos: Point,
+    sprite_half: Size,
     seconds: f32,
     status: AgentStatus,
 ) -> (Point, bool) {
     if !matches!(status, AgentStatus::Ok | AgentStatus::Unknown) {
         return (Point::ORIGIN, false);
     }
-    // Keep wander bounds comfortably inside the room so sprites
-    // don't clip the border. `amp_x` caps around a third of the
-    // half-width; `amp_y` is tighter so sprites stay in the lower
-    // half where the slots already sit.
-    let amp_x = (room_rect.width * 0.18).clamp(8.0, 60.0);
-    let amp_y = (room_rect.height * 0.08).clamp(4.0, 24.0);
+    // Derive per-direction wander headroom from the sprite's current
+    // distance to each room edge minus its own half-size and a small
+    // margin. The tighter of the two (left/right or top/bottom)
+    // becomes the symmetric amplitude for that axis — a sprite
+    // placed in a left-column slot can only wander as far as the
+    // right-edge clearance allows before it clips the room border.
+    const EDGE_MARGIN: f32 = 4.0;
+    let left_room = (base_pos.x - room_rect.x) - sprite_half.width - EDGE_MARGIN;
+    let right_room = (room_rect.x + room_rect.width - base_pos.x) - sprite_half.width - EDGE_MARGIN;
+    let top_room = (base_pos.y - room_rect.y) - sprite_half.height - EDGE_MARGIN;
+    let bottom_room =
+        (room_rect.y + room_rect.height - base_pos.y) - sprite_half.height - EDGE_MARGIN;
+    let headroom_x = left_room.min(right_room).max(0.0);
+    let headroom_y = top_room.min(bottom_room).max(0.0);
+
+    // Feel tuning caps on top of the geometric headroom — we never
+    // want a sprite to dart 120 px even in a huge room; the earlier
+    // [8, 60]/[4, 24] hand-picked bands still define the max.
+    let amp_x = (room_rect.width * 0.18).clamp(0.0, 60.0).min(headroom_x);
+    let amp_y = (room_rect.height * 0.08).clamp(0.0, 24.0).min(headroom_y);
 
     // Stable hash of the id — spreads sprites' phase offsets so
     // two lobsters in the same room don't sine-wave in unison.

@@ -23,7 +23,7 @@ use std::sync::LazyLock;
 
 use iced::advanced::image as iced_image;
 use iced::widget::canvas;
-use iced::{Color, Point, Rectangle, Size, Vector};
+use iced::{Color, Point, Rectangle, Size};
 
 use crate::domain::AgentStatus;
 use crate::ui::theme;
@@ -157,59 +157,91 @@ pub const MICROPHONE: Sprite = Sprite {
 // char-grid renderer; lobsters use image.
 // =====================================================================
 
-static LOBSTER_IDLE: LazyLock<[iced_image::Handle; 7]> = LazyLock::new(|| {
-    [
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/idle-0.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/idle-1.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/idle-2.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/idle-3.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/idle-4.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/idle-5.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/idle-6.png").as_slice(),
-        ),
-    ]
+/// Decode a PNG at runtime and return a Handle built from raw RGBA.
+/// Going through `image` + `from_rgba` (instead of `from_bytes`) lets
+/// us mirror pixel data in RAM before handing it to iced — that's how
+/// the flipped-handle arrays are built without relying on the canvas
+/// transform stack. Panics on malformed input, which is fine: the
+/// PNGs are baked in via `include_bytes!`, so a decode failure means
+/// a broken checkout, not a runtime error path.
+fn decode_rgba(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    let img = image::load_from_memory(bytes)
+        .expect("embedded lobster PNG decodes")
+        .to_rgba8();
+    let (w, h) = img.dimensions();
+    (w, h, img.into_raw())
+}
+
+/// Mirror RGBA pixels left-right in place. Why bake a second handle
+/// instead of flipping at draw time: iced 0.14's canvas image path
+/// does not honor a `scale_nonuniform(-1, 1)` on the transform stack
+/// reliably — the negative X scale flips the quad's winding and the
+/// backend ends up rendering the texture inverted on Y (the upside-
+/// down lobsters). Pre-flipping in RAM produces an identical-size
+/// RGBA buffer with columns reversed; drawing it with an unmodified
+/// transform stack renders as a clean horizontal mirror, no matter
+/// what the backend does with negative scales.
+fn mirror_horizontal(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let stride = w * 4;
+    let mut out = vec![0u8; rgba.len()];
+    for y in 0..h {
+        let row_start = y * stride;
+        for x in 0..w {
+            let src = row_start + (w - 1 - x) * 4;
+            let dst = row_start + x * 4;
+            out[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+        }
+    }
+    out
+}
+
+/// Construct the unflipped + flipped handle pair for one PNG.
+fn lobster_handle_pair(bytes: &[u8]) -> (iced_image::Handle, iced_image::Handle) {
+    let (w, h, rgba) = decode_rgba(bytes);
+    let flipped_rgba = mirror_horizontal(w, h, &rgba);
+    (
+        iced_image::Handle::from_rgba(w, h, rgba),
+        iced_image::Handle::from_rgba(w, h, flipped_rgba),
+    )
+}
+
+/// Paired (unflipped, flipped) handle arrays for one pose set. We
+/// store them as a tuple inside a single LazyLock so each PNG is
+/// decoded exactly once at first use and the two handle arrays stay
+/// in lockstep (frame i unflipped and frame i flipped come from the
+/// same raw RGBA buffer).
+type IdleHandles = ([iced_image::Handle; 7], [iced_image::Handle; 7]);
+type WalkHandles = ([iced_image::Handle; 8], [iced_image::Handle; 8]);
+
+static LOBSTER_IDLE_HANDLES: LazyLock<IdleHandles> = LazyLock::new(|| {
+    let p0 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-0.png"));
+    let p1 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-1.png"));
+    let p2 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-2.png"));
+    let p3 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-3.png"));
+    let p4 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-4.png"));
+    let p5 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-5.png"));
+    let p6 = lobster_handle_pair(include_bytes!("../../assets/lobster/idle-6.png"));
+    (
+        [p0.0, p1.0, p2.0, p3.0, p4.0, p5.0, p6.0],
+        [p0.1, p1.1, p2.1, p3.1, p4.1, p5.1, p6.1],
+    )
 });
 
-static LOBSTER_WALK: LazyLock<[iced_image::Handle; 8]> = LazyLock::new(|| {
-    [
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/walk-0.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/walk-1.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/walk-2.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/walk-3.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/walk-4.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/walk-5.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/walk-6.png").as_slice(),
-        ),
-        iced_image::Handle::from_bytes(
-            include_bytes!("../../assets/lobster/walk-7.png").as_slice(),
-        ),
-    ]
+static LOBSTER_WALK_HANDLES: LazyLock<WalkHandles> = LazyLock::new(|| {
+    let p0 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-0.png"));
+    let p1 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-1.png"));
+    let p2 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-2.png"));
+    let p3 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-3.png"));
+    let p4 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-4.png"));
+    let p5 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-5.png"));
+    let p6 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-6.png"));
+    let p7 = lobster_handle_pair(include_bytes!("../../assets/lobster/walk-7.png"));
+    (
+        [p0.0, p1.0, p2.0, p3.0, p4.0, p5.0, p6.0, p7.0],
+        [p0.1, p1.1, p2.1, p3.1, p4.1, p5.1, p6.1, p7.1],
+    )
 });
 
 /// Target render size. Deliberately set to **exactly half** the
@@ -302,19 +334,37 @@ pub fn draw_lobster(
     seconds: f32,
     flip_h: bool,
 ) {
-    // Slice refs so we can pick the idle vs walk tables without
-    // caring about the fixed-size difference between them. Each
-    // entry here pairs the frame slice with its per-frame anchor
-    // table so both scale in lockstep.
-    let (frames, anchors, hz): (&[iced_image::Handle], &[(f32, f32)], f32) = match status {
-        AgentStatus::Running | AgentStatus::Unknown => {
-            (LOBSTER_WALK.as_slice(), &LOBSTER_WALK_ANCHORS, 6.0)
-        }
-        AgentStatus::Ok => (LOBSTER_IDLE.as_slice(), &LOBSTER_IDLE_ANCHORS, 3.0),
-        AgentStatus::Error | AgentStatus::Disabled => {
-            (LOBSTER_IDLE.as_slice(), &LOBSTER_IDLE_ANCHORS, 0.0)
-        }
+    // Pick the (unflipped, flipped) handle arrays + anchor table for
+    // this status. The two arrays share one decode pass via
+    // `LOBSTER_*_HANDLES` so frame i is guaranteed pixel-mirrored
+    // against frame i unflipped.
+    type PoseSelection<'a> = (
+        &'a [iced_image::Handle],
+        &'a [iced_image::Handle],
+        &'a [(f32, f32)],
+        f32,
+    );
+    let (unflipped, flipped, anchors, hz): PoseSelection = match status {
+        AgentStatus::Running | AgentStatus::Unknown => (
+            &LOBSTER_WALK_HANDLES.0,
+            &LOBSTER_WALK_HANDLES.1,
+            &LOBSTER_WALK_ANCHORS,
+            6.0,
+        ),
+        AgentStatus::Ok => (
+            &LOBSTER_IDLE_HANDLES.0,
+            &LOBSTER_IDLE_HANDLES.1,
+            &LOBSTER_IDLE_ANCHORS,
+            3.0,
+        ),
+        AgentStatus::Error | AgentStatus::Disabled => (
+            &LOBSTER_IDLE_HANDLES.0,
+            &LOBSTER_IDLE_HANDLES.1,
+            &LOBSTER_IDLE_ANCHORS,
+            0.0,
+        ),
     };
+    let frames = if flip_h { flipped } else { unflipped };
     let (idx, phase) = if hz <= 0.0 || frames.is_empty() {
         (0, 0.0_f32)
     } else {
@@ -329,10 +379,15 @@ pub fn draw_lobster(
     // centroid ≠ body midline when claws/legs are extended — a
     // walking lobster's centroid drifts up to 6 source px across
     // the cycle. The anchor table records where the visible body
-    // midline actually lives in each source frame; shifting the
-    // draw rect by (anchor − canvas_center) makes that point land
-    // on `center` instead of the canvas midpoint.
-    let (ax, ay) = anchors[idx.min(anchors.len() - 1)];
+    // midline lives in each *unflipped* source frame; for a flipped
+    // handle, the x anchor mirrors across the canvas X midpoint so
+    // the body lands on `center` in either facing direction.
+    let (raw_ax, ay) = anchors[idx.min(anchors.len() - 1)];
+    let ax = if flip_h {
+        LOBSTER_SOURCE.width - raw_ax
+    } else {
+        raw_ax
+    };
     let canvas_cx = LOBSTER_SOURCE.width / 2.0;
     let canvas_cy = LOBSTER_SOURCE.height / 2.0;
     let scale_x = LOBSTER_SIZE.width / LOBSTER_SOURCE.width;
@@ -353,29 +408,17 @@ pub fn draw_lobster(
         ),
         LOBSTER_SIZE,
     );
-    // `snap(true)` asks the renderer to align the image to the
-    // pixel grid at draw time — iced docs explicitly recommend it
-    // for Nearest-filtered sprites to avoid graphical glitches.
     let image = iced_image::Image::new(handle)
         .filter_method(iced_image::FilterMethod::Nearest)
         .snap(true);
 
-    if flip_h {
-        // Horizontal mirror: translate to sprite center, scale X by
-        // -1, translate back, then draw. `with_save` auto-restores
-        // the transform on close so subsequent sprites aren't
-        // double-flipped. The pivot rounds to the pixel grid so
-        // the flipped origin also lands on integer coords.
-        let flip_pivot = center.x.round();
-        frame.with_save(|f| {
-            f.translate(Vector::new(flip_pivot, 0.0));
-            f.scale_nonuniform(Vector::new(-1.0, 1.0));
-            f.translate(Vector::new(-flip_pivot, 0.0));
-            f.draw_image(bounds, image);
-        });
-    } else {
-        frame.draw_image(bounds, image);
-    }
+    // No transform. The mirror is pre-baked into the flipped handle
+    // at LazyLock init — rendering with an unmodified transform
+    // stack avoids iced 0.14's canvas-backend quirk where a
+    // negative X scale inverts the image on Y (produced the
+    // upside-down lobsters seen when flip_h was applied via
+    // `scale_nonuniform`).
+    frame.draw_image(bounds, image);
 
     // Debug overlay. Env-gated so it doesn't pay the price in
     // normal runs. Makes flicker sources visible:
@@ -674,14 +717,42 @@ mod tests {
         // (e.g., someone adds a WALK frame without extending the
         // anchor table) at compile-time-ish via tests instead.
         assert_eq!(
-            LOBSTER_IDLE.len(),
+            LOBSTER_IDLE_HANDLES.0.len(),
             LOBSTER_IDLE_ANCHORS.len(),
             "idle frame count and anchor count must match",
         );
         assert_eq!(
-            LOBSTER_WALK.len(),
+            LOBSTER_IDLE_HANDLES.1.len(),
+            LOBSTER_IDLE_ANCHORS.len(),
+            "idle flipped frame count and anchor count must match",
+        );
+        assert_eq!(
+            LOBSTER_WALK_HANDLES.0.len(),
             LOBSTER_WALK_ANCHORS.len(),
             "walk frame count and anchor count must match",
         );
+        assert_eq!(
+            LOBSTER_WALK_HANDLES.1.len(),
+            LOBSTER_WALK_ANCHORS.len(),
+            "walk flipped frame count and anchor count must match",
+        );
+    }
+
+    #[test]
+    fn mirror_horizontal_reverses_rows() {
+        // 2×2 RGBA, row 0 = [R, G], row 1 = [B, A] (conceptually).
+        // After mirror, row 0 = [G, R], row 1 = [A, B].
+        #[rustfmt::skip]
+        let rgba = vec![
+            1, 0, 0, 255,   2, 0, 0, 255,
+            3, 0, 0, 255,   4, 0, 0, 255,
+        ];
+        let out = mirror_horizontal(2, 2, &rgba);
+        #[rustfmt::skip]
+        let expected = vec![
+            2, 0, 0, 255,   1, 0, 0, 255,
+            4, 0, 0, 255,   3, 0, 0, 255,
+        ];
+        assert_eq!(out, expected);
     }
 }
