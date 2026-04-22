@@ -1747,8 +1747,14 @@ impl App {
         };
 
         let total_unread: usize = self.unread.values().copied().sum();
+        // Stack: [tab-specific main] on top, global bottom strip
+        // (pair notice, approvals, status bar) below. The bottom
+        // strip used to live inside `overview()`, which meant
+        // switching to Settings or any other tab hid critical state
+        // like the pair-request notice with the approve-command.
+        let main_with_strip = iced::widget::column![main, self.bottom_strip()].spacing(0);
         let base = iced::widget::container(
-            iced::widget::row![sidebar::view(self.nav, total_unread), main].spacing(0),
+            iced::widget::row![sidebar::view(self.nav, total_unread), main_with_strip].spacing(0),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1785,9 +1791,29 @@ impl App {
         };
 
         let canvas = Canvas::new(scene).width(Length::Fill).height(Length::Fill);
-
         let cards = agent_card::row_view(&self.roster, &self.statuses);
 
+        iced::widget::column![
+            iced::widget::container(canvas)
+                .width(Length::Fill)
+                .height(Length::FillPortion(3))
+                .padding(iced::Padding::from(16)),
+            cards,
+            chat_input::view(
+                &self.chat_input,
+                self.connected,
+                &self.selected_chat_display(),
+            ),
+        ]
+        .spacing(0)
+        .into()
+    }
+
+    /// Build the bottom strip — pair-request notice (when a pair is
+    /// pending), pending-approvals panel, and the always-on status
+    /// bar. These are global concerns, not Overview-specific, so the
+    /// top-level `view` renders them under every tab's main content.
+    fn bottom_strip(&self) -> Element<'_, Message> {
         let main_usage = self
             .sessions
             .get("agent:main:main")
@@ -1806,37 +1832,12 @@ impl App {
                 .map(|u| (u.current.as_str(), u.latest.as_str())),
         });
 
-        // The approvals panel is a no-op row (empty iterator) when
-        // nothing's pending, so we can always include it in the
-        // layout without case-splitting on length.
-        let approvals_panel = if self.pending_approvals.is_empty() {
-            None
-        } else {
-            Some(approvals::view(self.pending_approvals.iter()))
-        };
-        let pair_notice = self
-            .pending_pair_request
-            .as_ref()
-            .map(approvals::pair_request_notice);
-
-        let mut col = iced::widget::column![
-            iced::widget::container(canvas)
-                .width(Length::Fill)
-                .height(Length::FillPortion(3))
-                .padding(iced::Padding::from(16)),
-            cards,
-            chat_input::view(
-                &self.chat_input,
-                self.connected,
-                &self.selected_chat_display(),
-            ),
-        ]
-        .spacing(0);
-        if let Some(notice) = pair_notice {
-            col = col.push(notice);
+        let mut col = iced::widget::column![].spacing(0);
+        if let Some(req) = self.pending_pair_request.as_ref() {
+            col = col.push(approvals::pair_request_notice(req));
         }
-        if let Some(panel) = approvals_panel {
-            col = col.push(panel);
+        if !self.pending_approvals.is_empty() {
+            col = col.push(approvals::view(self.pending_approvals.iter()));
         }
         col.push(status).into()
     }
