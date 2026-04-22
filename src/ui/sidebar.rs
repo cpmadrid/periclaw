@@ -12,11 +12,17 @@ use crate::Message;
 use crate::app::NavItem;
 use crate::ui::theme;
 
-/// Embedded full-color logo. Decoded once via `LazyLock` so the
+/// Transparent-background logo for the sidebar. Root-level
+/// `logo.png` bakes in a black square behind the octopus (no alpha
+/// channel — `sips -g all logo.png` shows `hasAlpha: no`), which
+/// clashed visibly with the sidebar's `SURFACE_1` background. The
+/// transparent variant at `assets/logo-transparent.png` is the same
+/// artwork with pure-black pixels keyed to alpha=0 so the sidebar's
+/// background shows through. Decoded once via `LazyLock` so the
 /// sidebar (re-rendered on every state update) doesn't rebuild the
 /// `image::Handle` from scratch on each paint.
 static LOGO_HANDLE: LazyLock<image::Handle> = LazyLock::new(|| {
-    const LOGO_PNG: &[u8] = include_bytes!("../../logo.png");
+    const LOGO_PNG: &[u8] = include_bytes!("../../assets/logo-transparent.png");
     image::Handle::from_bytes(LOGO_PNG)
 });
 
