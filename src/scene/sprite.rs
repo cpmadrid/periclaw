@@ -212,12 +212,27 @@ static LOBSTER_WALK: LazyLock<[iced_image::Handle; 8]> = LazyLock::new(|| {
     ]
 });
 
-/// Target render size on the canvas for a lobster sprite. Matches
-/// the source PNG aspect so the downscale is uniform; the source
-/// is 140×170 — see `LOBSTER_SOURCE`.
+/// Target render size. Deliberately set to **exactly half** the
+/// source resolution (140/2, 170/2) so the downsample is a clean
+/// 2× nearest-neighbor reduction — every target pixel samples a
+/// fixed 2×2 block of source texels, identically on every frame.
+///
+/// Why the exact integer ratio matters: at an arbitrary ratio like
+/// 66/140 ≈ 0.471, `FilterMethod::Nearest` picks a different source
+/// texel whenever the target rect's origin shifts by a fraction
+/// of a pixel (wander offset, bob, etc.). Even with `snap(true)`
+/// on the Image, the edges of the sprite shimmer because the
+/// "which-texel-wins" decision is sensitive to sub-pixel rect
+/// placement. At an integer scale factor the decision is fixed —
+/// adjacent target pixels always sample adjacent 2×2 source blocks
+/// with no interpolation ambiguity, no matter where the rect
+/// lands. Flicker goes away.
+///
+/// Must remain `LOBSTER_SOURCE / 2.0` if the source ever changes
+/// size; enforced by the `lobster_size_matches_source_scale` test.
 pub const LOBSTER_SIZE: Size = Size {
-    width: 66.0,
-    height: 80.0,
+    width: 70.0,
+    height: 85.0,
 };
 
 /// Native size of each PNG frame. All 15 frames were padded to this
@@ -641,6 +656,15 @@ mod tests {
         let s = sprite_size_px(&MONITOR, 4.0);
         assert_eq!(s.width, MONITOR.width() as f32 * 4.0);
         assert_eq!(s.height, MONITOR.height() as f32 * 4.0);
+    }
+
+    #[test]
+    fn lobster_size_matches_source_scale() {
+        // Flicker fix depends on the target being an integer
+        // reciprocal of the source. Anything else gives fractional
+        // downsampling and the edges shimmer again.
+        assert_eq!(LOBSTER_SIZE.width, LOBSTER_SOURCE.width / 2.0);
+        assert_eq!(LOBSTER_SIZE.height, LOBSTER_SOURCE.height / 2.0);
     }
 
     #[test]
