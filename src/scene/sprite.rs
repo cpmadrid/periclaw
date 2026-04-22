@@ -213,16 +213,64 @@ static LOBSTER_WALK: LazyLock<[iced_image::Handle; 8]> = LazyLock::new(|| {
 });
 
 /// Target render size on the canvas for a lobster sprite. Matches
-/// the 120×147 aspect ratio of the source PNG frames — every frame
-/// is padded to that same canvas size with the sprite centered, so
-/// drawing them all into this single target rect keeps the sprite's
-/// apparent scale + anchor rock-steady across the walk cycle. A
-/// per-frame sizing (from each PNG's intrinsic dims) would flicker
-/// because every pose has a slightly different bounding box.
+/// the source PNG aspect so the downscale is uniform; the source
+/// is 140×170 — see `LOBSTER_SOURCE`.
 pub const LOBSTER_SIZE: Size = Size {
     width: 66.0,
     height: 80.0,
 };
+
+/// Native size of each PNG frame. All 15 frames were padded to this
+/// canvas during extraction. Used when converting per-frame anchor
+/// offsets (measured in source pixels) to draw-space pixels.
+pub const LOBSTER_SOURCE: Size = Size {
+    width: 140.0,
+    height: 170.0,
+};
+
+/// Per-frame body anchors inside the 140×170 source canvas. Centroid
+/// alone wasn't enough to prevent flicker — a walking lobster with
+/// an extended claw has its centroid pulled off the body midline, so
+/// centroid-centered rendering made the body silhouette appear to
+/// hop between poses. These anchors are tuned so each frame's
+/// visible body midline lands at the same canvas point regardless
+/// of where the claws / legs happen to be.
+///
+/// Seed values come from measuring the body band's x-midpoint in
+/// each PNG; can be nudged by ±1 using the `PERICLAW_SPRITE_DEBUG=1`
+/// overlay without a recompile cycle needed per tweak (the overlay
+/// makes the mismatch visible; edit here, rebuild, re-check).
+const LOBSTER_IDLE_ANCHORS: [(f32, f32); 7] = [
+    (70.0, 85.0),
+    (70.0, 85.0),
+    (71.0, 85.0),
+    (70.0, 85.0),
+    (71.0, 85.0),
+    (70.0, 85.0),
+    (70.0, 85.0),
+];
+const LOBSTER_WALK_ANCHORS: [(f32, f32); 8] = [
+    (73.0, 85.0),
+    (74.0, 85.0),
+    (74.0, 85.0),
+    (75.0, 85.0),
+    (75.0, 85.0),
+    (76.0, 85.0),
+    (73.0, 85.0),
+    (70.0, 85.0),
+];
+
+/// Set `PERICLAW_SPRITE_DEBUG=1` in the env to enable a debug overlay:
+/// per-sprite crosshair at `center`, wireframe of the draw bounds,
+/// current frame index + phase underneath, and a static reference
+/// lobster in the top-left of the scene running its walk cycle
+/// without any of the wander / bob / flip / halo confounds.
+///
+/// Kept module-level so `office.rs` can peek at it to decide whether
+/// to render the reference sprite. Read once per launch — no hot
+/// path cost.
+pub static DEBUG_SPRITES: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("PERICLAW_SPRITE_DEBUG").is_ok());
 
 /// Draw a lobster centered on `center`, picking the frame based on
 /// status and clock phase. Running/Unknown agents cycle the WALK
@@ -239,32 +287,54 @@ pub fn draw_lobster(
     seconds: f32,
     flip_h: bool,
 ) {
-    // Slice refs so we can pick the idle vs walk array without
-    // caring about the fixed-size difference between them.
-    let (frames, hz): (&[iced_image::Handle], f32) = match status {
-        AgentStatus::Running | AgentStatus::Unknown => (LOBSTER_WALK.as_slice(), 6.0),
-        AgentStatus::Ok => (LOBSTER_IDLE.as_slice(), 3.0),
-        AgentStatus::Error | AgentStatus::Disabled => (LOBSTER_IDLE.as_slice(), 0.0),
+    // Slice refs so we can pick the idle vs walk tables without
+    // caring about the fixed-size difference between them. Each
+    // entry here pairs the frame slice with its per-frame anchor
+    // table so both scale in lockstep.
+    let (frames, anchors, hz): (&[iced_image::Handle], &[(f32, f32)], f32) = match status {
+        AgentStatus::Running | AgentStatus::Unknown => {
+            (LOBSTER_WALK.as_slice(), &LOBSTER_WALK_ANCHORS, 6.0)
+        }
+        AgentStatus::Ok => (LOBSTER_IDLE.as_slice(), &LOBSTER_IDLE_ANCHORS, 3.0),
+        AgentStatus::Error | AgentStatus::Disabled => {
+            (LOBSTER_IDLE.as_slice(), &LOBSTER_IDLE_ANCHORS, 0.0)
+        }
     };
-    let idx = if hz <= 0.0 || frames.is_empty() {
-        0
+    let (idx, phase) = if hz <= 0.0 || frames.is_empty() {
+        (0, 0.0_f32)
     } else {
-        let phase = (seconds * hz).rem_euclid(frames.len() as f32) as usize;
-        phase.min(frames.len() - 1)
+        let raw_phase = (seconds * hz).rem_euclid(frames.len() as f32);
+        let i = (raw_phase as usize).min(frames.len() - 1);
+        (i, raw_phase)
     };
     let handle = frames[idx].clone();
 
+    // Per-frame anchor shift. Each PNG was padded to a 140×170
+    // canvas with the sprite centered on its blob centroid, but
+    // centroid ≠ body midline when claws/legs are extended — a
+    // walking lobster's centroid drifts up to 6 source px across
+    // the cycle. The anchor table records where the visible body
+    // midline actually lives in each source frame; shifting the
+    // draw rect by (anchor − canvas_center) makes that point land
+    // on `center` instead of the canvas midpoint.
+    let (ax, ay) = anchors[idx.min(anchors.len() - 1)];
+    let canvas_cx = LOBSTER_SOURCE.width / 2.0;
+    let canvas_cy = LOBSTER_SOURCE.height / 2.0;
+    let scale_x = LOBSTER_SIZE.width / LOBSTER_SOURCE.width;
+    let scale_y = LOBSTER_SIZE.height / LOBSTER_SOURCE.height;
+    let dx = (ax - canvas_cx) * scale_x;
+    let dy = (ay - canvas_cy) * scale_y;
+
     // Pin the bounds origin to integer pixels before handing them
-    // to iced. Without this, sub-pixel positions (from wander /
-    // bob offsets, both float sines) would feed into the image
-    // renderer, and even at `FilterMethod::Nearest` the GPU picks
-    // subtly different source texels each frame — visible flicker
-    // along the sprite's edges. Belt-and-suspenders with the
-    // `snap(true)` flag below.
+    // to iced. Sub-pixel positions from wander / bob offsets would
+    // feed into the image renderer, and even at `FilterMethod::
+    // Nearest` the GPU picks subtly different source texels each
+    // frame — visible shimmer along the sprite's edges.
+    // `snap(true)` on the Image is belt-and-suspenders with this.
     let bounds = Rectangle::new(
         Point::new(
-            (center.x - LOBSTER_SIZE.width / 2.0).round(),
-            (center.y - LOBSTER_SIZE.height / 2.0).round(),
+            (center.x - LOBSTER_SIZE.width / 2.0 - dx).floor(),
+            (center.y - LOBSTER_SIZE.height / 2.0 - dy).floor(),
         ),
         LOBSTER_SIZE,
     );
@@ -279,8 +349,8 @@ pub fn draw_lobster(
         // Horizontal mirror: translate to sprite center, scale X by
         // -1, translate back, then draw. `with_save` auto-restores
         // the transform on close so subsequent sprites aren't
-        // double-flipped. The translate amount is rounded so the
-        // flipped origin still lands on the pixel grid.
+        // double-flipped. The pivot rounds to the pixel grid so
+        // the flipped origin also lands on integer coords.
         let flip_pivot = center.x.round();
         frame.with_save(|f| {
             f.translate(Vector::new(flip_pivot, 0.0));
@@ -290,6 +360,56 @@ pub fn draw_lobster(
         });
     } else {
         frame.draw_image(bounds, image);
+    }
+
+    // Debug overlay. Env-gated so it doesn't pay the price in
+    // normal runs. Makes flicker sources visible:
+    //   - Crosshair at `center` — should stay rock-still even
+    //     while the sprite cycles. If the body's visible midline
+    //     drifts off the crosshair, the anchor table needs a
+    //     nudge for the frame index shown below.
+    //   - Bounds wireframe — reveals whether bounds origin
+    //     snapped to integers cleanly.
+    //   - `idx` and `phase` text — so the tuning loop is "watch
+    //     which frame looks off → edit that index in the anchor
+    //     table → rebuild".
+    if *DEBUG_SPRITES {
+        let crosshair_color = *theme::TERMINAL_GREEN;
+        let x_line = canvas::Path::line(
+            Point::new(center.x - 12.0, center.y),
+            Point::new(center.x + 12.0, center.y),
+        );
+        let y_line = canvas::Path::line(
+            Point::new(center.x, center.y - 12.0),
+            Point::new(center.x, center.y + 12.0),
+        );
+        frame.stroke(
+            &x_line,
+            canvas::Stroke::default()
+                .with_color(crosshair_color)
+                .with_width(1.0),
+        );
+        frame.stroke(
+            &y_line,
+            canvas::Stroke::default()
+                .with_color(crosshair_color)
+                .with_width(1.0),
+        );
+        let wireframe = canvas::Path::rectangle(bounds.position(), bounds.size());
+        frame.stroke(
+            &wireframe,
+            canvas::Stroke::default()
+                .with_color(crosshair_color)
+                .with_width(1.0),
+        );
+        frame.fill_text(canvas::Text {
+            content: format!("i={idx} p={phase:.2}"),
+            position: Point::new(bounds.x, bounds.y + bounds.height + 2.0),
+            color: *theme::MUTED,
+            size: 10.0.into(),
+            font: iced::Font::MONOSPACE,
+            ..Default::default()
+        });
     }
 }
 
@@ -521,5 +641,23 @@ mod tests {
         let s = sprite_size_px(&MONITOR, 4.0);
         assert_eq!(s.width, MONITOR.width() as f32 * 4.0);
         assert_eq!(s.height, MONITOR.height() as f32 * 4.0);
+    }
+
+    #[test]
+    fn lobster_anchor_tables_match_frame_counts() {
+        // Index out-of-bounds in `draw_lobster` would panic at runtime
+        // and silently bury the flicker fix; catch a mismatched edit
+        // (e.g., someone adds a WALK frame without extending the
+        // anchor table) at compile-time-ish via tests instead.
+        assert_eq!(
+            LOBSTER_IDLE.len(),
+            LOBSTER_IDLE_ANCHORS.len(),
+            "idle frame count and anchor count must match",
+        );
+        assert_eq!(
+            LOBSTER_WALK.len(),
+            LOBSTER_WALK_ANCHORS.len(),
+            "walk frame count and anchor count must match",
+        );
     }
 }

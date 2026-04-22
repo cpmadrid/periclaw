@@ -13,7 +13,7 @@ use iced::{Color, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::Message;
 use crate::domain::{Agent, AgentId, AgentStatus, RoomId, room_for};
-use crate::scene::{RoomLayout, ThoughtBubble};
+use crate::scene::{RoomLayout, ThoughtBubble, sprite};
 use crate::ui::theme;
 
 /// Snapshot of what to draw. Cheap to clone; recreated each `view()`.
@@ -106,6 +106,22 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                     continue;
                 };
                 draw_bubble(frame, anchor, &bubble.text, bubble.kind, alpha);
+            }
+
+            // Debug reference lobster: a fixed-position WALK-cycling
+            // sprite in the top-left, with no wander, no bob, no
+            // flip-horizontal, no halo flash. Makes pose-shift flicker
+            // vs. sub-pixel edge shimmer visually distinguishable —
+            // the render bounds are stable, so any movement reveals
+            // frame-to-frame anchor drift directly.
+            if *crate::scene::sprite::DEBUG_SPRITES {
+                sprite::draw_lobster(
+                    frame,
+                    Point::new(80.0, 80.0),
+                    AgentStatus::Running,
+                    seconds,
+                    false,
+                );
             }
         });
 
