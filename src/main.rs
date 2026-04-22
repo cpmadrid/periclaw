@@ -46,7 +46,7 @@ fn main() -> iced::Result {
         }
     }
 
-    tracing::info!("starting Periclaw");
+    tracing::info!("starting PeriClaw");
 
     // Pull persisted UI state before the window opens so restored
     // dimensions apply on first paint, not after a visible resize.
@@ -67,7 +67,7 @@ fn main() -> iced::Result {
         app::App::update,
         app::App::view,
     )
-    .title("Periclaw")
+    .title("PeriClaw")
     .theme(app::App::theme)
     .subscription(app::App::subscription)
     .window(iced::window::Settings {

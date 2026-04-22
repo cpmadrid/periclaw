@@ -1,13 +1,24 @@
 //! Left-side nav: Overview / Chat / Agents / Sessions / Logs /
 //! Settings. The Chat row shows an unread-count badge when any
-//! agent has messages the operator hasn't seen yet.
+//! agent has messages the operator hasn't seen yet. Header stacks
+//! the PeriClaw logo above the wordmark in terminal-green.
 
-use iced::widget::{button, column, container, row, text};
-use iced::{Alignment, Border, Color, Element, Length, Padding};
+use std::sync::LazyLock;
+
+use iced::widget::{button, column, container, image, row, text};
+use iced::{Alignment, Border, Color, ContentFit, Element, Length, Padding};
 
 use crate::Message;
 use crate::app::NavItem;
 use crate::ui::theme;
+
+/// Embedded full-color logo. Decoded once via `LazyLock` so the
+/// sidebar (re-rendered on every state update) doesn't rebuild the
+/// `image::Handle` from scratch on each paint.
+static LOGO_HANDLE: LazyLock<image::Handle> = LazyLock::new(|| {
+    const LOGO_PNG: &[u8] = include_bytes!("../../logo.png");
+    image::Handle::from_bytes(LOGO_PNG)
+});
 
 pub fn view(active: NavItem, unread_chat: usize) -> Element<'static, Message> {
     let items = [
@@ -29,10 +40,19 @@ pub fn view(active: NavItem, unread_chat: usize) -> Element<'static, Message> {
     });
 
     let header = column![
-        container(text("MISSION").size(12).color(*theme::MUTED)).padding(Padding::from([12, 16])),
-        container(text("CONTROL").size(18).color(*theme::TERMINAL_GREEN),)
-            .padding(Padding::from([0, 16])),
-    ];
+        container(
+            image(LOGO_HANDLE.clone())
+                .width(Length::Fixed(96.0))
+                .height(Length::Fixed(96.0))
+                .content_fit(ContentFit::Contain),
+        )
+        .center_x(Length::Fill)
+        .padding(Padding::default().top(16).bottom(8)),
+        container(text("PeriClaw").size(20).color(*theme::TERMINAL_GREEN))
+            .center_x(Length::Fill)
+            .padding(Padding::default().bottom(12)),
+    ]
+    .spacing(0);
 
     container(column![header, nav.spacing(4)].spacing(24))
         .width(Length::Fixed(220.0))

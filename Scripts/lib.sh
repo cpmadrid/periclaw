@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Common Library Functions — Periclaw
+# Common Library Functions — PeriClaw
 # Sourced by ./dev and the activity scripts in Scripts/.
 # Keep this a thin wrapper; activity-specific logic belongs in its own script.
 

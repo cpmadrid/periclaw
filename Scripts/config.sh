@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 
-# Application Configuration — Periclaw
+# Application Configuration — PeriClaw
 
-# App information
-APP_NAME="Periclaw"
+# App information (APP_NAME is the user-visible display name; the
+# crate/binary/config-dir stay lowercase per the project's naming
+# convention — see memory/project_periclaw_naming.md).
+APP_NAME="PeriClaw"
 APP_EXECUTABLE="periclaw"
 APP_CRATE="periclaw"
 

@@ -522,7 +522,7 @@ async fn session(
         "maxProtocol": 3,
         "client": {
             "id": client_id,
-            "displayName": "Periclaw",
+            "displayName": "PeriClaw",
             "version": env!("CARGO_PKG_VERSION"),
             "platform": std::env::consts::OS,
             "mode": client_mode,

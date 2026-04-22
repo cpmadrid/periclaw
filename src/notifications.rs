@@ -19,7 +19,7 @@ use crate::domain::AgentId;
 use crate::net::events::GatewayUpdate;
 use crate::net::rpc::{ApprovalEventPayload, CronState};
 
-const APP_NAME: &str = "Periclaw";
+const APP_NAME: &str = "PeriClaw";
 
 /// Per-app dedup state. Lives in `App` so it survives across
 /// `WsEvent` arrivals but is cleared on disconnect (the heartbeats
