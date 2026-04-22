@@ -26,8 +26,10 @@ use crate::ui::theme;
 pub fn pair_request_notice(req: &PairRequest) -> Element<'_, Message> {
     let command = format!("openclaw devices approve {}", req.request_id);
 
-    // text_input needs an on_input to stay interactive/selectable;
-    // we wire it to the InputDiscard sink so any edits are dropped.
+    // text_input with an InputDiscard on_input handler keeps the
+    // text selectable (so Cmd/Ctrl-C still works) while dropping
+    // any typed edits — the command is read-only from the
+    // operator's perspective.
     let field = iced::widget::text_input("", &command)
         .on_input(Message::InputDiscard)
         .font(iced::Font::MONOSPACE)
@@ -35,7 +37,10 @@ pub fn pair_request_notice(req: &PairRequest) -> Element<'_, Message> {
         .padding(Padding::from([4, 8]))
         .width(Length::Fill);
 
-    let copy = iced::widget::button(text("Copy").size(11))
+    // "📋 Copy" — the clipboard glyph makes the button read as a
+    // copy action at a glance; the label stays for accessibility
+    // and for platforms where the emoji renders as a tofu block.
+    let copy = iced::widget::button(text("📋 Copy").size(11))
         .padding(Padding::from([4, 10]))
         .on_press(Message::CopyToClipboard(command.clone()));
 
@@ -57,14 +62,14 @@ pub fn pair_request_notice(req: &PairRequest) -> Element<'_, Message> {
         PairRequestKind::FirstPair => (
             "Device pairing required",
             "This desktop hasn't been approved on the gateway yet. \
-             Run the command below on the gateway host, then click \
-             Retry now:",
+             From your OpenClaw terminal, run the command below, \
+             then click Retry now:",
         ),
         PairRequestKind::ScopeUpgrade => (
             "Scope upgrade pending",
-            "The gateway has filed a pair-request to grant this \
-             desktop additional permissions. Run the command below \
-             on the gateway host, then click Retry now:",
+            "The gateway needs you to approve additional permissions \
+             for this desktop. From your OpenClaw terminal, run the \
+             command below, then click Retry now:",
         ),
     };
 

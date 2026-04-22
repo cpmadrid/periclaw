@@ -225,10 +225,13 @@ fn token_section<'a>(
 }
 
 fn save_row<'a>(_snap: &Snapshot<'a>) -> Element<'a, Message> {
-    let save = button(text("Save").size(13))
+    // Labeled "Connect" rather than "Save" because it does both —
+    // persists the form and immediately restarts the ws subscription
+    // so the Connection status line shows whether the values work.
+    let connect = button(text("Connect").size(13))
         .padding(Padding::from([6, 18]))
         .on_press(Message::SettingsSave);
-    row![Space::new().width(Length::Fill), save]
+    row![Space::new().width(Length::Fill), connect]
         .align_y(Alignment::Center)
         .into()
 }

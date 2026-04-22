@@ -1051,10 +1051,14 @@ impl App {
                 ui_state::save(&self.ui_state_snapshot());
 
                 // Token: only touch the secret store when the operator
-                // actually typed something. An empty field on Save
+                // actually typed something. An empty field on Connect
                 // means "don't change the current token" — use Clear
-                // to delete.
-                let token = std::mem::take(&mut self.settings_form.token);
+                // to delete. We deliberately *don't* wipe the form
+                // field after save — operators expect their typed
+                // value to stay visible (masked) so they can tell
+                // their entry persisted, rather than being left
+                // staring at a blank input wondering if it took.
+                let token = self.settings_form.token.trim().to_string();
                 if !token.is_empty() {
                     if let Err(e) = secret_store::save_token(&token) {
                         tracing::warn!(error = %e, "saving token to secret store failed");
