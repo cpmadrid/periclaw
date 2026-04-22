@@ -8,13 +8,27 @@
 //! button handlers. Unbounded is fine here: commands are user-paced
 //! (button clicks), not machine-paced.
 //!
-//! The channel is lazily created the first time either end touches
-//! it, so start-up ordering doesn't matter.
+//! ## Subscription restarts
 //!
-//! If the receiver has already been handed out (i.e. a second WS
-//! reconnect after process-level restart of the stream), `take_rx`
-//! returns `None` and the session runs without a command path — the
-//! existing sender stays live so the UI doesn't crash on a click.
+//! Iced may tear down and rebuild the subscription whenever the
+//! `ConnectParams` identity changes (URL update, token update,
+//! `save_nonce` bump). Each new subscription instance calls
+//! [`take_rx`], expecting a live receiver it can `await` on. If we
+//! handed out the receiver once and returned `None` forever after,
+//! the second subscription would run with a dead receiver — and
+//! `tokio::sync::mpsc::UnboundedReceiver::recv()` on a channel with
+//! all senders dropped returns `None` **immediately**. That breaks
+//! every `wait_or_command` in the session loop, collapsing backoffs
+//! to effectively zero and producing a reconnect-spam storm.
+//!
+//! The fix: [`take_rx`] always hands back a live receiver. On first
+//! call it returns the original; on subsequent calls it **rebuilds**
+//! the channel (new `tx` + `rx`) and atomically swaps the static
+//! sender so future [`sender`] calls write into the new channel.
+//! Any tx clones that the UI held from before the swap will fail
+//! sends silently — callers already handle `Err` from `send`, and
+//! the UI re-clones on every button dispatch anyway, so stale tx
+//! clones are short-lived.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -80,7 +94,13 @@ pub enum GatewayCommand {
 }
 
 struct Channel {
-    tx: UnboundedSender<GatewayCommand>,
+    /// Live sender. Swapped atomically (via Mutex) each time
+    /// [`take_rx`] rebuilds the channel so new `sender()` clones
+    /// always target the receiver the current session is awaiting.
+    tx: Mutex<UnboundedSender<GatewayCommand>>,
+    /// Live receiver, parked here until the session grabs it via
+    /// [`take_rx`]. `Some` before the first take, `None` between
+    /// takes (the next take rebuilds both sides of the channel).
     rx: Mutex<Option<UnboundedReceiver<GatewayCommand>>>,
 }
 
@@ -89,20 +109,42 @@ fn channel() -> &'static Channel {
     CHAN.get_or_init(|| {
         let (tx, rx) = unbounded_channel();
         Channel {
-            tx,
+            tx: Mutex::new(tx),
             rx: Mutex::new(Some(rx)),
         }
     })
 }
 
-/// Get a cloneable sender for dispatching commands from the UI.
+/// Get a cloneable sender for dispatching commands from the UI. The
+/// UI re-fetches this per action rather than caching it, so after a
+/// subscription restart the new sender reaches the current session
+/// with no explicit refresh step.
 pub fn sender() -> UnboundedSender<GatewayCommand> {
-    channel().tx.clone()
+    channel()
+        .tx
+        .lock()
+        .expect("commands tx mutex poisoned")
+        .clone()
 }
 
-/// Claim the receiver. Called once by the WS session task. Returns
-/// `None` on subsequent calls so we don't race two receivers against
-/// one channel.
-pub fn take_rx() -> Option<UnboundedReceiver<GatewayCommand>> {
-    channel().rx.lock().ok().and_then(|mut g| g.take())
+/// Claim a live receiver for the WS session. On first call returns
+/// the original. On subsequent calls (subscription restart) rebuilds
+/// the channel and returns the fresh receiver, swapping the static
+/// sender so the UI's next `sender()` clone writes into the new
+/// channel.
+///
+/// Never returns `None` — a dead receiver in the session loop
+/// collapses every `wait_or_command` to zero sleep and triggers
+/// reconnect-spam storms, so we always hand back something live.
+pub fn take_rx() -> UnboundedReceiver<GatewayCommand> {
+    let ch = channel();
+    if let Some(rx) = ch.rx.lock().ok().and_then(|mut g| g.take()) {
+        return rx;
+    }
+    // Subsequent subscription instance. Rebuild.
+    let (new_tx, new_rx) = unbounded_channel();
+    if let Ok(mut tx_guard) = ch.tx.lock() {
+        *tx_guard = new_tx;
+    }
+    new_rx
 }

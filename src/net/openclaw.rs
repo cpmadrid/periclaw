@@ -152,16 +152,15 @@ pub fn connect(params: &ConnectParams) -> Pin<Box<dyn Stream<Item = WsEvent> + S
             }
         };
 
-        // Claim the UI→WS command receiver. Single owner — subsequent
-        // reconnects reuse the same receiver across session attempts.
-        // If someone already took it (shouldn't happen on a fresh
-        // process) we substitute a dangling receiver so the session
-        // loop's select arm has something to await without panicking.
-        let mut cmd_rx = commands::take_rx().unwrap_or_else(|| {
-            tracing::warn!("command receiver already claimed; UI → WS commands will no-op");
-            let (_dangling_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            rx
-        });
+        // Claim a live UI→WS command receiver. `take_rx` is guaranteed
+        // to return something live even on subscription restart — if
+        // the receiver was previously consumed it rebuilds the
+        // channel and swaps the static sender so the UI's next
+        // `sender()` clone targets this new receiver. Without that
+        // invariant a dead receiver would make `cmd_rx.recv()` return
+        // `None` instantly, which would collapse every
+        // `wait_or_command` sleep to zero and produce reconnect spam.
+        let mut cmd_rx = commands::take_rx();
 
         let mut backoff = INITIAL_BACKOFF;
 
