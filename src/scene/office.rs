@@ -86,7 +86,8 @@ impl<'a> canvas::Program<Message> for OfficeScene<'a> {
                     // slot. Running adds a vertical bob on top of the
                     // base position (stays where they're working).
                     // Errored/Disabled stay anchored to their slot.
-                    let (wander, facing_left) = wander_offset(&agent.id, &room_rect, seconds, status);
+                    let (wander, facing_left) =
+                        wander_offset(&agent.id, &room_rect, seconds, status);
                     let wander_pos = Point::new(base_pos.x + wander.x, base_pos.y + wander.y);
                     let pos = animated_position(wander_pos, status, now);
                     draw_sprite(frame, pos, agent, status, flash, seconds, facing_left);

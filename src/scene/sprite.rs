@@ -134,67 +134,60 @@ pub const MICROPHONE: Sprite = Sprite {
     ]],
 };
 
-/// Space Lobster — PeriClaw's mascot sprite. Top-down view with two
-/// raised claws, segmented body, fan tail, and three leg pairs on
-/// each side. Three frames total:
-///   - frame 0: relaxed — legs spread, tail open
-///   - frame 1: step-left — legs shift left, claws wider
-///   - frame 2: step-right — legs shift right, claws narrower
+/// Space Lobster — PeriClaw's mascot sprite. Front-facing, 15×14
+/// grid, with two raised claws at the top, a plump body with eye
+/// stalks, a segmented tail tapering to a fan, and leg pairs
+/// radiating out from each side.
 ///
-/// Cycling 0→1→0→2 at a slow Hz reads as a patient scuttle.
+/// Two frames:
+///   - frame 0: legs aligned, standing pose
+///   - frame 1: legs staggered, stepping pose
+///
+/// Facing direction is achieved at render time via `flip_h` in
+/// `draw_sprite_pixels`, so the horizontal-walk cycle uses just
+/// these two frames regardless of which way the lobster is
+/// scuttling.
 ///
 /// Palette roles:
 ///   X primary (shell color — green by default, operator-configurable)
 ///   x primary-dim (underbody shading)
 ///   W light (eye highlights, claw tip gleam)
-///   K dark outline (eyes, joints)
-///
-/// Used for every agent and job sprite. Color is picked from the
-/// agent's theme at draw time so the same template can paint a
-/// green Sebastian or a red cron without duplicating the shape.
+///   K dark outline (eyes, joints, pincer crease)
 pub const LOBSTER: Sprite = Sprite {
     frames: &[
-        // Frame 0 — idle / neutral pose
+        // Frame 0 — legs aligned
         &[
-            "..K........K..",
-            "..X........X..",
-            "..X........X..",
-            ".XXX......XXX.",
-            "XXWXX.KK.XXWXX",
-            "XXXXXXXXXXXXXX",
-            ".XXXXXXXXXXXX.",
-            "XX.XXXXXXXX.XX",
-            "X..X..XX..X..X",
-            "...XXXXXXXX...",
-            "....xXXXXx....",
+            "X...X.....X...X",
+            "X...X.....X...X",
+            "XXXXX.....XXXXX",
+            ".XXX.......XXX.",
+            "..XX.......XX..",
+            "..XX.KXXXK.XX..",
+            "..XXWXXXXXWXX..",
+            "..XXXXXXXXXXX..",
+            ".XXXXXXXXXXXXX.",
+            "X..XXXXXXXXX..X",
+            "X..XXXXXXXXX..X",
+            "....XXXXXXX....",
+            ".....XXXXX.....",
+            "......XXX......",
         ],
-        // Frame 1 — step-left: legs slide left, left claw reaches
+        // Frame 1 — legs staggered (scuttle step)
         &[
-            ".K.........K..",
-            ".X.........X..",
-            ".X.........X..",
-            "XXX.......XXX.",
-            "XXWX..KK..XWXX",
-            "XXXXXXXXXXXXXX",
-            ".XXXXXXXXXXXX.",
-            "XX.XXXXXXXX.XX",
-            ".X..XX..X..X.X",
-            "...XXXXXXXX...",
-            "...xXXXXx.....",
-        ],
-        // Frame 2 — step-right: legs slide right, right claw reaches
-        &[
-            "..K.........K.",
-            "..X.........X.",
-            "..X.........X.",
-            ".XXX.......XXX",
-            "XXWX..KK..XWXX",
-            "XXXXXXXXXXXXXX",
-            ".XXXXXXXXXXXX.",
-            "XX.XXXXXXXX.XX",
-            "X.X..X..XX..X.",
-            "...XXXXXXXX...",
-            ".....xXXXXx...",
+            "X...X.....X...X",
+            "X...X.....X...X",
+            "XXXXX.....XXXXX",
+            ".XXX.......XXX.",
+            "..XX.......XX..",
+            "..XX.KXXXK.XX..",
+            "..XXWXXXXXWXX..",
+            "..XXXXXXXXXXX..",
+            ".XXXXXXXXXXXXX.",
+            ".X.XXXXXXXXX.X.",
+            "X...XXXXXXX...X",
+            "....XXXXXXX....",
+            ".....XXXXX.....",
+            "......XXX......",
         ],
     ],
 };
@@ -437,8 +430,8 @@ mod tests {
     #[test]
     fn frame_phase_cycles_through_all_frames() {
         // `hz` reads as "frames per second" — at 2 Hz, each frame
-        // lasts 0.5 s. The lobster is 3 frames, so t=0→frame 0,
-        // t=0.5→frame 1, t=1.0→frame 2, t=1.5→frame 0 again.
+        // lasts 0.5 s. Lobster is 2 frames, so t=0→frame 0,
+        // t=0.5→frame 1, t=1.0→frame 0, wrap.
         assert!(std::ptr::eq(
             LOBSTER.frame(0.0, 2.0).as_ptr(),
             LOBSTER.frames[0].as_ptr()
@@ -453,10 +446,6 @@ mod tests {
         ));
         assert!(std::ptr::eq(
             LOBSTER.frame(1.0, 2.0).as_ptr(),
-            LOBSTER.frames[2].as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            LOBSTER.frame(1.5, 2.0).as_ptr(),
             LOBSTER.frames[0].as_ptr()
         ));
         // Hz = 0 pins frame 0 regardless of time (fully static
