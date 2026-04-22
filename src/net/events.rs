@@ -81,13 +81,14 @@ pub enum WsEvent {
     /// last activity, etc.). Drives both the status bar's `ctx:`
     /// indicator and the full Sessions nav tab.
     SessionUsage(SessionInfo),
-    /// Gateway rejected connect with `NOT_PAIRED / scope-upgrade` —
-    /// the paired device record doesn't cover the scopes we asked
-    /// for. Carries the pair-request id the operator approves via
-    /// `openclaw devices approve <id>`. When `None`, the upgrade
-    /// has been resolved (or wasn't required) and any pending
-    /// indicator should be cleared.
-    ScopeUpgradePending(Option<String>),
+    /// Gateway rejected connect with `PAIRING_REQUIRED` — covers
+    /// both the initial pair (`reason: not-paired`) and a
+    /// scope-upgrade pair (`reason: scope-upgrade`). Carries the
+    /// pair-request metadata the operator needs to approve via
+    /// `openclaw devices approve <request_id>`. When `None`, the
+    /// request has been resolved (or wasn't required) and any
+    /// pending UI indicator should be cleared.
+    PairRequestPending(Option<PairRequest>),
     /// Pending exec approval requires operator attention.
     ApprovalRequested(ApprovalEventPayload),
     /// Previously-pending approval has resolved (granted/denied).
@@ -111,6 +112,41 @@ pub struct GatewayUpdate {
     pub current: String,
     pub latest: String,
     pub channel: String,
+}
+
+/// Payload for [`WsEvent::PairRequestPending`]. The gateway emits
+/// `details.code == "PAIRING_REQUIRED"` for two related cases:
+///
+/// - Initial pair (`reason: "not-paired"`) — operator hasn't
+///   approved this device at all yet.
+/// - Scope upgrade (`reason: "scope-upgrade"`) — device is paired
+///   but the requested scopes exceed what was approved.
+///
+/// The resolution command is the same for both (`openclaw devices
+/// approve <request_id>`); only the UI label + guidance differ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairRequest {
+    /// `requestId` the operator passes to `openclaw devices approve`.
+    pub request_id: String,
+    /// SHA-256(pubkey) hex of this desktop's Ed25519 device key.
+    /// Handy to cross-reference against `openclaw devices list` on
+    /// the gateway host.
+    pub device_id: Option<String>,
+    /// Short server-authored hint (from `details.remediationHint`).
+    /// When `Some`, the UI shows it verbatim below the command.
+    pub remediation_hint: Option<String>,
+    /// Distinguishes "first pair" from "scope upgrade" so the UI
+    /// picks the right headline.
+    pub kind: PairRequestKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairRequestKind {
+    /// `details.reason == "not-paired"` — brand-new device.
+    FirstPair,
+    /// `details.reason == "scope-upgrade"` — paired but requesting
+    /// broader scopes.
+    ScopeUpgrade,
 }
 
 /// Coarse-grained agent activity signals derived from the `agent` event

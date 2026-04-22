@@ -180,26 +180,35 @@ pub fn connect(params: &ConnectParams) -> Pin<Box<dyn Stream<Item = WsEvent> + S
                     tracing::warn!("session ended cleanly (unexpected); reconnecting");
                     backoff = INITIAL_BACKOFF;
                 }
-                Err(SessionError::ScopeUpgradePending { request_id }) => {
+                Err(SessionError::PairingRequired(req)) => {
+                    let headline = match req.kind {
+                        crate::net::events::PairRequestKind::FirstPair => "device pairing required",
+                        crate::net::events::PairRequestKind::ScopeUpgrade => {
+                            "scope-upgrade pairing required"
+                        }
+                    };
                     tracing::warn!(
-                        %request_id,
-                        "scope-upgrade pairing required — waiting for operator approval",
+                        request_id = %req.request_id,
+                        kind = ?req.kind,
+                        "{headline} — waiting for operator approval",
+                    );
+                    let short_reason = format!(
+                        "awaiting pair approval ({})",
+                        &req.request_id[..req.request_id.len().min(8)]
                     );
                     let _ = out
-                        .send(WsEvent::ScopeUpgradePending(Some(request_id.clone())))
+                        .send(WsEvent::PairRequestPending(Some(req.clone())))
                         .await;
-                    let _ = out
-                        .send(WsEvent::Disconnected(format!(
-                            "awaiting scope-upgrade approval ({request_id})"
-                        )))
-                        .await;
+                    let _ = out.send(WsEvent::Disconnected(short_reason)).await;
                     // Hot-reconnecting re-acknowledges the same
-                    // requestId without progress and spams logs. Wait
-                    // a long human-paced interval — the operator has
-                    // to go run `openclaw devices approve <id>`. Any
-                    // inbound command (practically: the "Retry now"
-                    // button sending `Reconnect`) short-circuits the
-                    // wait so approvals take effect immediately.
+                    // requestId without progress and spams both our
+                    // log and the gateway's. Wait a long human-paced
+                    // interval — the operator has to go run
+                    // `openclaw devices approve <id>` on the gateway
+                    // host. Any inbound command (practically: the
+                    // "Retry now" button sending `Reconnect`)
+                    // short-circuits the wait so approvals take
+                    // effect immediately.
                     wait_or_command(SCOPE_UPGRADE_BACKOFF, &mut cmd_rx).await;
                     continue;
                 }
@@ -300,13 +309,16 @@ enum SessionError {
     Connect(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("handshake rejected: {0}")]
     HandshakeRejected(String),
-    /// Gateway filed a pair-request to expand scopes; operator must
-    /// approve via `openclaw devices approve <request_id>` before
-    /// this connection can succeed. Carried separately so the
-    /// reconnect loop can back off far longer than a transient
-    /// network failure.
-    #[error("scope-upgrade pairing required (request {request_id})")]
-    ScopeUpgradePending { request_id: String },
+    /// Gateway filed a pair-request; operator must approve via
+    /// `openclaw devices approve <request_id>` before this
+    /// connection can succeed. Covers both the initial-pair case
+    /// (`reason: not-paired`) and the scope-upgrade case
+    /// (`reason: scope-upgrade`). Carried separately so the
+    /// reconnect loop can back off long — retry-spam is pointless
+    /// while a human decision is pending, and floods both our log
+    /// and the gateway's.
+    #[error("pairing required (request {})", .0.request_id)]
+    PairingRequired(crate::net::events::PairRequest),
     #[error("handshake timeout")]
     HandshakeTimeout,
     #[error("socket closed")]
@@ -518,23 +530,22 @@ async fn session(
                                     "gateway connect accepted",
                                 );
                                 // Hand a successful connect to the UI
-                                // and clear any lingering scope-upgrade
-                                // notice.
-                                let _ = out.send(WsEvent::ScopeUpgradePending(None)).await;
+                                // and clear any lingering pair-request
+                                // notice (initial pair or scope upgrade).
+                                let _ = out.send(WsEvent::PairRequestPending(None)).await;
                                 let _ = out.send(WsEvent::Connected).await;
                                 break;
                             }
-                            // Scope-upgrade pair requests are distinct
-                            // from generic handshake failures: the
-                            // gateway will keep rejecting us until the
-                            // operator approves the pair-request, so
-                            // fast reconnection is pointless and would
-                            // flood logs. Tag the error variant so the
-                            // outer loop backs off long and the UI can
-                            // show the requestId.
-                            let details = v
-                                .get("error")
-                                .and_then(|e| e.get("details"));
+                            // Pair-requests (initial pair AND scope
+                            // upgrade) are distinct from generic
+                            // handshake failures: the gateway will
+                            // keep rejecting us until the operator
+                            // approves out-of-band, so fast
+                            // reconnection is pointless and would
+                            // flood both logs. Tag the error variant
+                            // so the outer loop backs off long and
+                            // the UI can surface the approve command.
+                            let details = v.get("error").and_then(|e| e.get("details"));
                             let err_code = details
                                 .and_then(|d| d.get("code"))
                                 .and_then(Value::as_str);
@@ -545,12 +556,30 @@ async fn session(
                                 .and_then(|d| d.get("requestId"))
                                 .and_then(Value::as_str);
                             if err_code == Some("PAIRING_REQUIRED")
-                                && reason == Some("scope-upgrade")
                                 && let Some(rid) = request_id
                             {
-                                return Err(SessionError::ScopeUpgradePending {
-                                    request_id: rid.to_string(),
-                                });
+                                let device_id = details
+                                    .and_then(|d| d.get("deviceId"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string);
+                                let remediation_hint = details
+                                    .and_then(|d| d.get("remediationHint"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string);
+                                let kind = match reason {
+                                    Some("scope-upgrade") => {
+                                        crate::net::events::PairRequestKind::ScopeUpgrade
+                                    }
+                                    _ => crate::net::events::PairRequestKind::FirstPair,
+                                };
+                                return Err(SessionError::PairingRequired(
+                                    crate::net::events::PairRequest {
+                                        request_id: rid.to_string(),
+                                        device_id,
+                                        remediation_hint,
+                                        kind,
+                                    },
+                                ));
                             }
                             return Err(SessionError::HandshakeRejected(txt.to_string()));
                         }

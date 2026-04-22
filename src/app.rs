@@ -179,11 +179,12 @@ pub struct App {
     pub sessions: HashMap<String, SessionInfo>,
     /// Gateway-side update notification, when one is pending.
     pub gateway_update: Option<GatewayUpdate>,
-    /// Non-None when the gateway has filed a scope-upgrade
-    /// pair-request for this device and is waiting on the operator
-    /// to approve it (`openclaw devices approve <id>`). Surfaced in
-    /// the approvals panel area so the fix is visible.
-    pub scope_upgrade_pending: Option<String>,
+    /// Non-None when the gateway has filed a pair-request (first
+    /// pair OR scope upgrade) for this device and is waiting on
+    /// the operator to approve it out-of-band (`openclaw devices
+    /// approve <id>`). Surfaced in the approvals panel area so the
+    /// fix is visible from any tab.
+    pub pending_pair_request: Option<crate::net::events::PairRequest>,
     /// Full cron state per cron agent — keeps schedule-adjacent fields
     /// (`nextRunAtMs`, `lastRunAtMs`, `lastDurationMs`, `lastError`)
     /// that the Agents tab shows but the Overview sprite doesn't need.
@@ -524,7 +525,7 @@ impl App {
             pending_approvals: HashMap::new(),
             sessions: HashMap::new(),
             gateway_update: None,
-            scope_upgrade_pending: None,
+            pending_pair_request: None,
             cron_details: HashMap::new(),
             cron_ids: HashMap::new(),
             channel_details: HashMap::new(),
@@ -810,10 +811,10 @@ impl App {
             Message::RequestReconnect => {
                 tracing::info!("UI: operator requested reconnect");
                 // Clear the notice optimistically — the WS will either
-                // reconnect and send a fresh `ScopeUpgradePending` if
+                // reconnect and send a fresh `PairRequestPending` if
                 // still unpaired, or `Connected` if the approval took
                 // effect.
-                self.scope_upgrade_pending = None;
+                self.pending_pair_request = None;
                 if let Err(e) = crate::net::commands::sender()
                     .send(crate::net::commands::GatewayCommand::Reconnect)
                 {
@@ -1590,14 +1591,15 @@ impl App {
                     logs::push_line(&mut self.log_lines, LogLine::classify(line));
                 }
             }
-            WsEvent::ScopeUpgradePending(request_id) => {
-                if request_id.is_some() {
+            WsEvent::PairRequestPending(req) => {
+                if let Some(pr) = req.as_ref() {
                     tracing::info!(
-                        request_id = ?request_id,
-                        "scope-upgrade pair-request filed",
+                        request_id = %pr.request_id,
+                        kind = ?pr.kind,
+                        "pair-request filed",
                     );
                 }
-                self.scope_upgrade_pending = request_id;
+                self.pending_pair_request = req;
             }
             WsEvent::ApprovalResolved { id } => {
                 self.last_poll = Some(Instant::now());
@@ -1808,10 +1810,10 @@ impl App {
         } else {
             Some(approvals::view(self.pending_approvals.iter()))
         };
-        let scope_notice = self
-            .scope_upgrade_pending
-            .as_deref()
-            .map(approvals::scope_upgrade_notice);
+        let pair_notice = self
+            .pending_pair_request
+            .as_ref()
+            .map(approvals::pair_request_notice);
 
         let mut col = iced::widget::column![
             iced::widget::container(canvas)
@@ -1826,7 +1828,7 @@ impl App {
             ),
         ]
         .spacing(0);
-        if let Some(notice) = scope_notice {
+        if let Some(notice) = pair_notice {
             col = col.push(notice);
         }
         if let Some(panel) = approvals_panel {
