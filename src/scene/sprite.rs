@@ -212,11 +212,15 @@ static LOBSTER_WALK: LazyLock<[iced_image::Handle; 8]> = LazyLock::new(|| {
     ]
 });
 
-/// Target render size on the canvas for a lobster sprite. Roughly
-/// matches the old char-grid's on-screen footprint (≈45 px wide
-/// at 3× scale) with a little extra vertical room for the fan tail.
+/// Target render size on the canvas for a lobster sprite. Matches
+/// the 120×147 aspect ratio of the source PNG frames — every frame
+/// is padded to that same canvas size with the sprite centered, so
+/// drawing them all into this single target rect keeps the sprite's
+/// apparent scale + anchor rock-steady across the walk cycle. A
+/// per-frame sizing (from each PNG's intrinsic dims) would flicker
+/// because every pose has a slightly different bounding box.
 pub const LOBSTER_SIZE: Size = Size {
-    width: 54.0,
+    width: 66.0,
     height: 80.0,
 };
 
