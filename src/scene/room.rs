@@ -117,18 +117,17 @@ mod tests {
     use crate::domain::room::default_rooms;
 
     #[test]
-    fn six_room_layout_is_three_by_two() {
+    fn three_room_layout_is_three_by_one() {
         let rooms = default_rooms();
         let layout = RoomLayout::new(
             Rectangle::new(Point::ORIGIN, Size::new(900.0, 600.0)),
             &rooms,
         );
         let rects: Vec<_> = layout.iter().map(|(_, r)| r).collect();
-        assert_eq!(rects.len(), 6);
-        // First row y-equal to second room.
+        assert_eq!(rects.len(), 3);
+        // Same row — three rooms across in one strip.
         assert_eq!(rects[0].y, rects[1].y);
-        // Second row shifted down.
-        assert!(rects[3].y > rects[0].y);
+        assert_eq!(rects[1].y, rects[2].y);
     }
 
     #[test]
@@ -150,7 +149,7 @@ mod tests {
             Rectangle::new(Point::ORIGIN, Size::new(900.0, 600.0)),
             &rooms,
         );
-        assert!(layout.room_rect("command-hq").is_some());
+        assert!(layout.room_rect("command-deck").is_some());
         assert!(layout.room_rect("does-not-exist").is_none());
     }
 }

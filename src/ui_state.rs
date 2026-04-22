@@ -59,9 +59,15 @@ pub struct UiState {
     pub rooms: Vec<Room>,
     /// Per-job preferred room id. Keyed by job id (cron name /
     /// channel provider name) → room id. Absent entries fall back to
-    /// the legacy defaults in `crate::domain::room`.
+    /// the legacy defaults in `crate::domain::room`. Currently unused
+    /// on render (jobs don't appear as sprites) but persisted so the
+    /// operator's prior choice survives if we re-surface jobs later.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub job_rooms: HashMap<String, String>,
+    /// Per-agent home-room override. Keyed by agent id → room id.
+    /// Absent entries fall back to `domain::room::MAIN_ROOM`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub agent_rooms: HashMap<String, String>,
 }
 
 /// Non-secret connection settings. Absent fields mean "not configured";
@@ -243,6 +249,7 @@ mod tests {
             },
             rooms: Vec::new(),
             job_rooms: HashMap::new(),
+            agent_rooms: HashMap::new(),
         };
         let raw = serde_json::to_string(&original).unwrap();
         let parsed: UiState = serde_json::from_str(&raw).unwrap();

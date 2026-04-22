@@ -17,6 +17,14 @@ pub const FADE_START: Duration = Duration::from_millis(1500);
 pub const MESSAGE_TTL: Duration = Duration::from_millis(8000);
 pub const MESSAGE_FADE_START: Duration = Duration::from_millis(6500);
 
+/// Work bubbles label a job the agent is actively processing. They're
+/// meant to read as ambient status ("right now, he's on X") rather than
+/// a message — longer TTL than a status stub but never fade on their
+/// own; `App::apply_job_status` removes them when the job leaves
+/// `Running`.
+pub const WORK_TTL: Duration = Duration::from_secs(60 * 60);
+pub const WORK_FADE_START: Duration = Duration::from_secs(60 * 60 - 1);
+
 #[derive(Debug, Clone)]
 pub struct ThoughtBubble {
     pub agent: AgentId,
@@ -41,6 +49,10 @@ pub enum BubbleKind {
     /// as Message but colored distinctly so the operator can tell
     /// their own message apart from the agent's reply.
     Outgoing,
+    /// "Working on …" label shown while a job is active. Styled with
+    /// the terminal-green accent, pinned for the job's full Running
+    /// duration (cleared explicitly when status changes).
+    Work,
 }
 
 impl ThoughtBubble {
@@ -86,10 +98,23 @@ impl ThoughtBubble {
         }
     }
 
+    /// Constructor for "working on X" bubbles. Lifetime is effectively
+    /// unbounded — callers explicitly remove the bubble when the job
+    /// transitions out of Running (see `App::apply_job_status`).
+    pub fn work(agent: AgentId, text: impl Into<String>) -> Self {
+        Self {
+            agent,
+            text: text.into(),
+            born: Instant::now(),
+            kind: BubbleKind::Work,
+        }
+    }
+
     fn ttl(&self) -> Duration {
         match self.kind {
             BubbleKind::Status => TTL,
             BubbleKind::Message | BubbleKind::Tool | BubbleKind::Outgoing => MESSAGE_TTL,
+            BubbleKind::Work => WORK_TTL,
         }
     }
 
@@ -97,6 +122,7 @@ impl ThoughtBubble {
         match self.kind {
             BubbleKind::Status => FADE_START,
             BubbleKind::Message | BubbleKind::Tool | BubbleKind::Outgoing => MESSAGE_FADE_START,
+            BubbleKind::Work => WORK_FADE_START,
         }
     }
 

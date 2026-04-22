@@ -38,6 +38,10 @@ pub struct Snapshot<'a> {
     pub pending_approvals: usize,
     /// Gateway-side update notification (`current`, `latest`).
     pub update: Option<(&'a str, &'a str)>,
+    /// Display labels of jobs currently in `Running` state — surfaced
+    /// as a "working on …" segment so the signal is visible from
+    /// every tab, not just Overview.
+    pub running_jobs: Vec<&'a str>,
 }
 
 pub fn view(snap: Snapshot<'_>) -> Element<'_, Message> {
@@ -102,6 +106,16 @@ pub fn view(snap: Snapshot<'_>) -> Element<'_, Message> {
             ))
             .size(11)
             .color(color),
+        ));
+    }
+
+    if !snap.running_jobs.is_empty() {
+        let label = running_jobs_label(&snap.running_jobs);
+        items.push(clickable(
+            Message::NavClicked(NavItem::Agents),
+            text(format!("· {label}"))
+                .size(11)
+                .color(*theme::TERMINAL_GREEN),
         ));
     }
 
@@ -201,6 +215,16 @@ where
     container(content).padding(Padding::from([3, 6])).into()
 }
 
+/// "working: <name>" (1 job) or "working: <name> +N" (many). Keeps
+/// the strip concise even when several crons fire at once.
+fn running_jobs_label(names: &[&str]) -> String {
+    match names.len() {
+        0 => String::new(),
+        1 => format!("working: {}", names[0]),
+        n => format!("working: {} +{}", names[0], n - 1),
+    }
+}
+
 fn connection_line<'a>(snap: &Snapshot<'a>) -> (&'static str, String) {
     if snap.connected {
         ("●", "connected".to_string())
@@ -258,6 +282,7 @@ mod tests {
             main_usage: None,
             pending_approvals: 0,
             update: None,
+            running_jobs: Vec::new(),
         };
         let (dot, label) = connection_line(&snap);
         assert_eq!(dot, "●");
@@ -275,10 +300,21 @@ mod tests {
             main_usage: None,
             pending_approvals: 0,
             update: None,
+            running_jobs: Vec::new(),
         };
         let (dot, label) = connection_line(&snap);
         assert_eq!(dot, "○");
         assert_eq!(label, "disconnected: auth failed");
+    }
+
+    #[test]
+    fn running_jobs_label_cases() {
+        assert_eq!(running_jobs_label(&[]), "");
+        assert_eq!(running_jobs_label(&["zpool"]), "working: zpool");
+        assert_eq!(
+            running_jobs_label(&["zpool", "auto-update", "digest"]),
+            "working: zpool +2"
+        );
     }
 
     #[test]
