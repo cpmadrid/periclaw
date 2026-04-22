@@ -226,31 +226,17 @@ fn draw_sprite(
     seconds: f32,
     flip_h: bool,
 ) {
-    use crate::scene::sprite::{self, DEFAULT_SCALE};
+    use crate::domain::AgentKind;
+    use crate::scene::sprite::{self, DEFAULT_SCALE, LOBSTER_SIZE};
 
     let color: Color = agent.color();
-    let template = sprite::sprite_for(agent);
-    let size = sprite::sprite_size_px(template, DEFAULT_SCALE);
 
-    // Disabled agents render muted — the pixels are still there but
-    // softened, so the operator reads "present but off" instead of
-    // "gone." Error/Unknown stay fully lit so they're eye-catching.
-    let intensity = match status {
-        AgentStatus::Disabled => 0.45,
-        AgentStatus::Unknown => 0.75,
-        _ => 1.0,
-    };
-
-    // Frame rate per state: running agents walk/flutter faster,
-    // idle ones shift slowly (still alive, not urgent), disabled
-    // freeze entirely.
-    let frame_hz = match (agent.kind, status) {
-        (_, AgentStatus::Disabled) => 0.0,
-        (crate::domain::AgentKind::Cron, AgentStatus::Running) => 4.0,
-        (crate::domain::AgentKind::Main, AgentStatus::Running) => 3.0,
-        (crate::domain::AgentKind::Cron, _) => 1.0,
-        (crate::domain::AgentKind::Main, _) => 0.6,
-        (crate::domain::AgentKind::Channel, _) => 0.0,
+    // Flash halo size depends on which sprite path we take, since
+    // lobsters render at a fixed pixel size and char-grid sprites
+    // scale with their template dimensions.
+    let halo_size = match agent.kind {
+        AgentKind::Main | AgentKind::Cron => LOBSTER_SIZE,
+        AgentKind::Channel => sprite::sprite_size_px(&sprite::MONITOR, DEFAULT_SCALE),
     };
 
     // Transition-flash halo. A brief, widening rectangle behind the
@@ -260,11 +246,11 @@ fn draw_sprite(
     if flash > 0.0 {
         let pad = 6.0 + 4.0 * flash;
         let halo_origin = Point::new(
-            pos.x - size.width / 2.0 - pad,
-            pos.y - size.height / 2.0 - pad,
+            pos.x - halo_size.width / 2.0 - pad,
+            pos.y - halo_size.height / 2.0 - pad,
         );
-        let halo_size = Size::new(size.width + pad * 2.0, size.height + pad * 2.0);
-        let halo = Path::rectangle(halo_origin, halo_size);
+        let halo_rect = Size::new(halo_size.width + pad * 2.0, halo_size.height + pad * 2.0);
+        let halo = Path::rectangle(halo_origin, halo_rect);
         frame.stroke(
             &halo,
             Stroke::default()
@@ -276,36 +262,51 @@ fn draw_sprite(
         );
     }
 
-    sprite::draw_sprite_pixels(
-        frame,
-        pos,
-        template,
-        DEFAULT_SCALE,
-        color,
-        intensity,
-        seconds,
-        frame_hz,
-        flip_h,
-    );
-
-    // Channels get a scrolling scanline on the "screen" region of
-    // the monitor sprite (rows 3..8, cols 3..12 in the template),
-    // but only while connected — a disabled provider's dark screen
-    // sells "off."
-    if matches!(agent.kind, crate::domain::AgentKind::Channel)
-        && !matches!(status, AgentStatus::Disabled)
-    {
-        sprite::draw_scanline(
-            frame,
-            pos,
-            template,
-            DEFAULT_SCALE,
-            3..8,
-            3..12,
-            seconds,
-            color,
-        );
+    match agent.kind {
+        AgentKind::Main | AgentKind::Cron => {
+            // Image-based lobster. Per-frame color tinting isn't
+            // applied — the sprite artwork is its own identity; the
+            // existing per-agent color is used only for the halo
+            // flash above. Operator-visible color customization
+            // comes back when we ship multiple sheet variants.
+            sprite::draw_lobster(frame, pos, status, seconds, flip_h);
+        }
+        AgentKind::Channel => {
+            let template = &sprite::MONITOR;
+            let intensity = match status {
+                AgentStatus::Disabled => 0.45,
+                AgentStatus::Unknown => 0.75,
+                _ => 1.0,
+            };
+            sprite::draw_sprite_pixels(
+                frame,
+                pos,
+                template,
+                DEFAULT_SCALE,
+                color,
+                intensity,
+                seconds,
+                0.0,
+                flip_h,
+            );
+            // Scrolling scanline while connected — disabled stays
+            // dark.
+            if !matches!(status, AgentStatus::Disabled) {
+                sprite::draw_scanline(
+                    frame,
+                    pos,
+                    template,
+                    DEFAULT_SCALE,
+                    3..8,
+                    3..12,
+                    seconds,
+                    color,
+                );
+            }
+        }
     }
+    // Re-compute size for label offset below.
+    let size = halo_size;
 
     // Name tag under the sprite. We approximate "centered" by offsetting
     // by half the expected text width (monospace ≈ 6px per char @ 11pt).

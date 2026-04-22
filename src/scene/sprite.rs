@@ -19,10 +19,13 @@
 //! small (≤ 16 cells per side) so nothing crushes under the office
 //! layout's available per-slot area.
 
-use iced::widget::canvas;
-use iced::{Color, Point, Size};
+use std::sync::LazyLock;
 
-use crate::domain::{Agent, AgentKind};
+use iced::advanced::image as iced_image;
+use iced::widget::canvas;
+use iced::{Color, Point, Rectangle, Size, Vector};
+
+use crate::domain::AgentStatus;
 use crate::ui::theme;
 
 /// One animated sprite — 1+ frames of equal dimensions. A single-
@@ -134,63 +137,120 @@ pub const MICROPHONE: Sprite = Sprite {
     ]],
 };
 
-/// Space Lobster — PeriClaw's mascot sprite. Front-facing, 15×14
-/// grid, with two raised claws at the top, a plump body with eye
-/// stalks, a segmented tail tapering to a fan, and leg pairs
-/// radiating out from each side.
-///
-/// Two frames:
-///   - frame 0: legs aligned, standing pose
-///   - frame 1: legs staggered, stepping pose
-///
-/// Facing direction is achieved at render time via `flip_h` in
-/// `draw_sprite_pixels`, so the horizontal-walk cycle uses just
-/// these two frames regardless of which way the lobster is
-/// scuttling.
-///
-/// Palette roles:
-///   X primary (shell color — green by default, operator-configurable)
-///   x primary-dim (underbody shading)
-///   W light (eye highlights, claw tip gleam)
-///   K dark outline (eyes, joints, pincer crease)
-pub const LOBSTER: Sprite = Sprite {
-    frames: &[
-        // Frame 0 — legs aligned
-        &[
-            "X...X.....X...X",
-            "X...X.....X...X",
-            "XXXXX.....XXXXX",
-            ".XXX.......XXX.",
-            "..XX.......XX..",
-            "..XX.KXXXK.XX..",
-            "..XXWXXXXXWXX..",
-            "..XXXXXXXXXXX..",
-            ".XXXXXXXXXXXXX.",
-            "X..XXXXXXXXX..X",
-            "X..XXXXXXXXX..X",
-            "....XXXXXXX....",
-            ".....XXXXX.....",
-            "......XXX......",
-        ],
-        // Frame 1 — legs staggered (scuttle step)
-        &[
-            "X...X.....X...X",
-            "X...X.....X...X",
-            "XXXXX.....XXXXX",
-            ".XXX.......XXX.",
-            "..XX.......XX..",
-            "..XX.KXXXK.XX..",
-            "..XXWXXXXXWXX..",
-            "..XXXXXXXXXXX..",
-            ".XXXXXXXXXXXXX.",
-            ".X.XXXXXXXXX.X.",
-            "X...XXXXXXX...X",
-            "....XXXXXXX....",
-            ".....XXXXX.....",
-            "......XXX......",
-        ],
-    ],
+// =====================================================================
+// Space Lobster sprite — image-based.
+//
+// The pixel-art char-grid approach worked for decor but didn't have
+// the fidelity for the mascot. The lobster now loads from a bundled
+// PNG sprite sheet that the operator can swap / re-theme per release.
+//
+// Frames live at `assets/lobster/{idle,walk}-{0..3}.png` — four each
+// for IDLE and WALK. They're embedded with `include_bytes!` so a
+// release binary remains a single file (no asset-path resolution at
+// runtime). Decoded once via `LazyLock` — Iced caches the GPU
+// texture by `Handle` identity, so cloning the Handle on every frame
+// redraw is cheap.
+//
+// Rendering goes through `draw_lobster` (canvas image + nearest-
+// neighbor filter) instead of `draw_sprite_pixels` (per-cell rect
+// fill). The two paths coexist: decor and MONITOR still use the
+// char-grid renderer; lobsters use image.
+// =====================================================================
+
+static LOBSTER_IDLE: LazyLock<[iced_image::Handle; 4]> = LazyLock::new(|| {
+    [
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/idle-0.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/idle-1.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/idle-2.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/idle-3.png").as_slice(),
+        ),
+    ]
+});
+
+static LOBSTER_WALK: LazyLock<[iced_image::Handle; 4]> = LazyLock::new(|| {
+    [
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/walk-0.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/walk-1.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/walk-2.png").as_slice(),
+        ),
+        iced_image::Handle::from_bytes(
+            include_bytes!("../../assets/lobster/walk-3.png").as_slice(),
+        ),
+    ]
+});
+
+/// Target render size on the canvas for a lobster sprite. Roughly
+/// matches the old char-grid's on-screen footprint (≈45 px wide
+/// at 3× scale) with a little extra vertical room for the fan tail.
+pub const LOBSTER_SIZE: Size = Size {
+    width: 54.0,
+    height: 80.0,
 };
+
+/// Draw a lobster centered on `center`, picking the frame based on
+/// status and clock phase. Running/Unknown agents cycle the WALK
+/// frames; Ok agents cycle IDLE; Disabled/Errored pin to the first
+/// idle frame (still visible, just not animating).
+///
+/// `flip_h` mirrors the sprite horizontally via a canvas transform
+/// so a lobster can face either direction without per-direction
+/// frames.
+pub fn draw_lobster(
+    frame: &mut canvas::Frame,
+    center: Point,
+    status: AgentStatus,
+    seconds: f32,
+    flip_h: bool,
+) {
+    let (frames, hz): (&[iced_image::Handle; 4], f32) = match status {
+        AgentStatus::Running | AgentStatus::Unknown => (&LOBSTER_WALK, 4.0),
+        AgentStatus::Ok => (&LOBSTER_IDLE, 2.0),
+        AgentStatus::Error | AgentStatus::Disabled => (&LOBSTER_IDLE, 0.0),
+    };
+    let idx = if hz <= 0.0 {
+        0
+    } else {
+        let phase = (seconds * hz).rem_euclid(frames.len() as f32) as usize;
+        phase.min(frames.len() - 1)
+    };
+    let handle = frames[idx].clone();
+
+    let bounds = Rectangle::new(
+        Point::new(
+            center.x - LOBSTER_SIZE.width / 2.0,
+            center.y - LOBSTER_SIZE.height / 2.0,
+        ),
+        LOBSTER_SIZE,
+    );
+    let image = iced_image::Image::new(handle).filter_method(iced_image::FilterMethod::Nearest);
+
+    if flip_h {
+        // Horizontal mirror: translate to sprite center, scale X by
+        // -1, translate back, then draw. `with_save` auto-restores
+        // the transform on close so subsequent sprites aren't
+        // double-flipped.
+        frame.with_save(|f| {
+            f.translate(Vector::new(center.x, 0.0));
+            f.scale_nonuniform(Vector::new(-1.0, 1.0));
+            f.translate(Vector::new(-center.x, 0.0));
+            f.draw_image(bounds, image);
+        });
+    } else {
+        frame.draw_image(bounds, image);
+    }
+}
 
 /// CRT monitor — screen + stand. Single-frame because it's a
 /// machine; the screen "glow" is added at draw time as a scrolling
@@ -225,19 +285,6 @@ pub fn decor_for_room(room: crate::domain::RoomId) -> Option<&'static Sprite> {
         RoomId::MemoryVault => &ARCHIVE,
         RoomId::Studio => &MICROPHONE,
     })
-}
-
-/// Pick the template for an agent. Main and cron both render as
-/// space lobsters — the idea is that crons are jobs the main lobster
-/// handles, so visually the office is a colony of lobsters at
-/// different workstations. Channel providers still render as CRT
-/// monitors until the agent/job split lands and channels move out
-/// of the scene entirely.
-pub fn sprite_for(agent: &Agent) -> &'static Sprite {
-    match agent.kind {
-        AgentKind::Main | AgentKind::Cron => &LOBSTER,
-        AgentKind::Channel => &MONITOR,
-    }
 }
 
 /// Pick a reasonable scale (pixels per cell) for a sprite that fits
@@ -395,13 +442,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_sprites_are_rectangular() {
+    fn char_grid_sprites_are_rectangular() {
         // Every row across every frame must have the same width and
         // frame height must match. A ragged row would mis-align the
         // render; a short frame would pop the sprite shorter on
-        // alternate ticks.
+        // alternate ticks. Applies to the remaining char-grid
+        // sprites (decor + MONITOR) — LOBSTER lives in image form
+        // now and is verified by the runtime PNG-decode path.
         for sprite in [
-            &LOBSTER,
             &MONITOR,
             &TELESCOPE,
             &CONSOLE,
@@ -428,38 +476,9 @@ mod tests {
     }
 
     #[test]
-    fn frame_phase_cycles_through_all_frames() {
-        // `hz` reads as "frames per second" — at 2 Hz, each frame
-        // lasts 0.5 s. Lobster is 2 frames, so t=0→frame 0,
-        // t=0.5→frame 1, t=1.0→frame 0, wrap.
-        assert!(std::ptr::eq(
-            LOBSTER.frame(0.0, 2.0).as_ptr(),
-            LOBSTER.frames[0].as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            LOBSTER.frame(0.25, 2.0).as_ptr(),
-            LOBSTER.frames[0].as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            LOBSTER.frame(0.5, 2.0).as_ptr(),
-            LOBSTER.frames[1].as_ptr()
-        ));
-        assert!(std::ptr::eq(
-            LOBSTER.frame(1.0, 2.0).as_ptr(),
-            LOBSTER.frames[0].as_ptr()
-        ));
-        // Hz = 0 pins frame 0 regardless of time (fully static
-        // sprites like the monitor use this).
-        assert!(std::ptr::eq(
-            LOBSTER.frame(10.0, 0.0).as_ptr(),
-            LOBSTER.frames[0].as_ptr()
-        ));
-    }
-
-    #[test]
     fn sprite_size_scales() {
-        let s = sprite_size_px(&LOBSTER, 4.0);
-        assert_eq!(s.width, LOBSTER.width() as f32 * 4.0);
-        assert_eq!(s.height, LOBSTER.height() as f32 * 4.0);
+        let s = sprite_size_px(&MONITOR, 4.0);
+        assert_eq!(s.width, MONITOR.width() as f32 * 4.0);
+        assert_eq!(s.height, MONITOR.height() as f32 * 4.0);
     }
 }
