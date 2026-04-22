@@ -13,6 +13,7 @@
 //! the UI to first-launch state — so panicking here would cost more
 //! than it protects.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -20,6 +21,7 @@ use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::app::NavItem;
+use crate::domain::Room;
 
 const STATE_FILE: &str = "desktop-state.json";
 
@@ -49,6 +51,17 @@ pub struct UiState {
     /// plaintext fallback (debug). See `src/secret_store.rs`.
     #[serde(default, skip_serializing_if = "Settings::is_empty")]
     pub settings: Settings,
+    /// Configured room list. Empty ≠ "no rooms": an empty / absent value
+    /// on disk means "use the built-in defaults" so a first-run state
+    /// file doesn't need a rooms block. Once the operator reorders or
+    /// renames anything, we persist the full list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rooms: Vec<Room>,
+    /// Per-job preferred room id. Keyed by job id (cron name /
+    /// channel provider name) → room id. Absent entries fall back to
+    /// the legacy defaults in `crate::domain::room`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub job_rooms: HashMap<String, String>,
 }
 
 /// Non-secret connection settings. Absent fields mean "not configured";
@@ -228,6 +241,8 @@ mod tests {
                 gateway_url: Some("wss://gw.example/".to_string()),
                 mode: Some("ws".to_string()),
             },
+            rooms: Vec::new(),
+            job_rooms: HashMap::new(),
         };
         let raw = serde_json::to_string(&original).unwrap();
         let parsed: UiState = serde_json::from_str(&raw).unwrap();
@@ -262,6 +277,11 @@ mod tests {
         // (empty) settings rather than fail.
         assert!(parsed.settings.gateway_url.is_none());
         assert!(parsed.settings.mode.is_none());
+        // Same story for the room layout fields added in the
+        // dynamic-rooms refactor — missing entirely should round-trip
+        // to empty, letting the App constructor seed defaults.
+        assert!(parsed.rooms.is_empty());
+        assert!(parsed.job_rooms.is_empty());
     }
 
     #[test]

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use crate::app::NavItem;
-use crate::domain::{AgentId, AgentKind};
+use crate::domain::AgentId;
 use crate::net::rpc::{AgentInfo, CronState, SessionInfo};
 
 /// A thing the operator can invoke via the palette. Each maps 1:1
@@ -152,21 +152,13 @@ pub fn build_entries(ctx: PaletteContext<'_>) -> Vec<PaletteEntry> {
         });
     }
 
-    // Destructive: reset session, per Main agent. Keeps the
-    // two-click confirmation — the palette just arms the first
-    // click, the operator runs the palette again to confirm.
+    // Destructive: reset session, per chat agent. Everything in
+    // `chat_agents` comes from `agents.list`, which by definition is
+    // chat-capable — no kind check needed anymore. Keeps the
+    // two-click confirmation: the palette arms the first click, the
+    // operator runs the palette again to confirm.
     for info in ctx.chat_agents {
-        // Main agents only — the reset-session semantic only
-        // applies to the chat-capable agents from `agents.list`.
         let agent_id = AgentId::new(info.id.clone());
-        let is_main = ctx
-            .agent_kind
-            .get(&agent_id)
-            .is_some_and(|k| matches!(k, AgentKind::Main))
-            || info.id == "main";
-        if !is_main {
-            continue;
-        }
         out.push(PaletteEntry {
             action: PaletteAction::ResetMainSession(agent_id),
             label: format!("Reset session for {}", info.display_with_emoji()),
@@ -186,7 +178,6 @@ pub struct PaletteContext<'a> {
     pub cron_details: &'a HashMap<AgentId, CronState>,
     pub cron_ids: &'a HashMap<AgentId, String>,
     pub sessions: &'a HashMap<String, SessionInfo>,
-    pub agent_kind: &'a HashMap<AgentId, AgentKind>,
 }
 
 /// Rank entries against a query. Returns `(entry_index, score)`
@@ -390,6 +381,28 @@ mod tests {
         assert!(is_word_boundary(b"hello world", 6)); // "world"
         assert!(!is_word_boundary(b"hello world", 3)); // inside "hello"
         assert!(is_word_boundary(b"reset-session", 6));
+    }
+
+    #[test]
+    fn reset_entry_emitted_for_every_chat_agent() {
+        let chat_agents = vec![AgentInfo {
+            id: "main".to_string(),
+            name: Some("Sebastian".to_string()),
+            ..Default::default()
+        }];
+        let cron_details = HashMap::new();
+        let cron_ids = HashMap::new();
+        let sessions = HashMap::new();
+        let entries = build_entries(PaletteContext {
+            chat_agents: &chat_agents,
+            cron_details: &cron_details,
+            cron_ids: &cron_ids,
+            sessions: &sessions,
+        });
+        let has_reset = entries.iter().any(|e| {
+            matches!(&e.action, PaletteAction::ResetMainSession(_)) && e.label.contains("Sebastian")
+        });
+        assert!(has_reset, "expected Reset entry; got: {entries:?}");
     }
 
     fn entry(label: &str, group: PaletteGroup) -> PaletteEntry {

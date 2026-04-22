@@ -494,16 +494,16 @@ pub const MONITOR: Sprite = Sprite {
 
 /// Pick the decor sprite for a given room. Returned as `Option` so
 /// callers can skip rooms we haven't designed decor for yet.
-pub fn decor_for_room(room: crate::domain::RoomId) -> Option<&'static Sprite> {
-    use crate::domain::RoomId;
-    Some(match room {
-        RoomId::Observatory => &TELESCOPE,
-        RoomId::CommandHq => &CONSOLE,
-        RoomId::Security => &CABINET,
-        RoomId::ResearchLab => &BEAKERS,
-        RoomId::MemoryVault => &ARCHIVE,
-        RoomId::Studio => &MICROPHONE,
-    })
+pub fn decor_for_room(room_id: &str) -> Option<&'static Sprite> {
+    match room_id {
+        "observatory" => Some(&TELESCOPE),
+        "command-hq" => Some(&CONSOLE),
+        "security" => Some(&CABINET),
+        "research-lab" => Some(&BEAKERS),
+        "memory-vault" => Some(&ARCHIVE),
+        "studio" => Some(&MICROPHONE),
+        _ => None,
+    }
 }
 
 /// Pick a reasonable scale (pixels per cell) for a sprite that fits

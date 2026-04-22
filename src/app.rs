@@ -7,7 +7,9 @@ use iced::widget::{Canvas, canvas};
 use iced::{Element, Length, Subscription, Task, time};
 
 use crate::config;
-use crate::domain::{Agent, AgentId, AgentKind, AgentStatus, agent};
+use crate::domain::job::JobKind;
+use crate::domain::room::{self, Room};
+use crate::domain::{Agent, AgentId, AgentStatus, Job, JobId, agent};
 use crate::logs::{self, LogFilters, LogLine, LogSeverity};
 use crate::net::events::{ActivityKind, GatewayUpdate};
 use crate::net::rpc::{
@@ -158,7 +160,21 @@ pub enum Message {
 pub struct App {
     pub nav: NavItem,
     pub roster: Vec<Agent>,
+    /// Non-chat runtime entities — cron jobs and channel providers.
+    /// Split from `roster` (which stays Main-only) so the "what kind
+    /// of thing is this?" branching that used to live on `AgentKind`
+    /// disappears in favor of separate maps.
+    pub jobs: HashMap<JobId, Job>,
     pub statuses: HashMap<AgentId, AgentStatus>,
+    /// Configured room list — the dynamic replacement for the old
+    /// 6-room hardcoded enum. Seeded from `UiState` (itself seeded
+    /// with the legacy 6-room set on first launch) so existing scenes
+    /// look unchanged until the operator customizes it.
+    pub rooms: Vec<Room>,
+    /// Per-job preferred home room id. Resolved from `UiState`; entries
+    /// absent here fall back to `room::default_cron_room()` for crons
+    /// and `CHANNEL_OK_ROOM` for channels.
+    pub job_rooms: HashMap<JobId, String>,
     pub bubbles: Vec<ThoughtBubble>,
     pub active_model: Option<String>,
     /// Timestamp of the most recent state update (push event OR bootstrap
@@ -215,6 +231,13 @@ pub struct App {
     /// ring-pulse animation in `OfficeScene`; entries older than
     /// [`TRANSITION_FLASH`] are pruned each tick.
     pub transition_moments: HashMap<AgentId, Instant>,
+    /// Same thing, for jobs — cron/channel state transitions (idle→
+    /// running, ok→error) flash their sprite's halo ring.
+    pub job_transition_moments: HashMap<JobId, Instant>,
+    /// Ring buffer of "work flourishes" — short-lived visual pulses
+    /// spawned when a cron transitions from idle into `Running`.
+    /// Pruned by age each tick.
+    pub flourishes: Vec<crate::scene::Flourish>,
     pub scene_cache: canvas::Cache,
     /// Cache for the Sessions tab's detail-pane sparkline. Cleared
     /// whenever the active session's points change so the canvas
@@ -513,10 +536,23 @@ impl App {
             .filter(|s| !s.is_empty())
             .map(AgentId::new)
             .unwrap_or_else(|| AgentId::new("main"));
+        let rooms = if state.rooms.is_empty() {
+            room::default_rooms()
+        } else {
+            state.rooms.clone()
+        };
+        let job_rooms: HashMap<JobId, String> = state
+            .job_rooms
+            .iter()
+            .map(|(k, v)| (JobId::new(k.clone()), v.clone()))
+            .collect();
         Self {
             nav,
             roster: agent::seed_roster(),
+            jobs: HashMap::new(),
             statuses: HashMap::new(),
+            rooms,
+            job_rooms,
             bubbles: Vec::new(),
             active_model: None,
             last_poll: None,
@@ -533,6 +569,8 @@ impl App {
             log_filters: LogFilters::default(),
             logs_auto_tail: true,
             transition_moments: HashMap::new(),
+            job_transition_moments: HashMap::new(),
+            flourishes: Vec::new(),
             scene_cache: canvas::Cache::default(),
             sparkline_cache: canvas::Cache::default(),
             row_sparkline_caches: HashMap::new(),
@@ -577,20 +615,11 @@ impl App {
     /// Called on every render and every input-changed message —
     /// cheap (a few HashMap iterations); no caching warranted.
     fn palette_entries(&self) -> Vec<PaletteEntry> {
-        // The catalog's "reset-session" entries gate on agent kind,
-        // so we need an `AgentId → AgentKind` map even though the
-        // rest of the app keys its kind info through the `roster`
-        // vec. Build one on the fly.
-        let mut agent_kind = HashMap::new();
-        for a in &self.roster {
-            agent_kind.insert(a.id.clone(), a.kind);
-        }
         palette::build_entries(PaletteContext {
             chat_agents: &self.chat_agents,
             cron_details: &self.cron_details,
             cron_ids: &self.cron_ids,
             sessions: &self.sessions,
-            agent_kind: &agent_kind,
         })
     }
 
@@ -663,12 +692,25 @@ impl App {
 
     /// Snapshot the bits of the app we persist across launches.
     fn ui_state_snapshot(&self) -> UiState {
+        // Preserve the configured rooms in their in-memory order so
+        // the operator's custom layout (once there's UI to edit it)
+        // survives restarts. Default room set is the same as
+        // `room::default_rooms()` so writing a seed here is a no-op
+        // for first-run users.
+        let rooms = self.rooms.clone();
+        let job_rooms: HashMap<String, String> = self
+            .job_rooms
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.clone()))
+            .collect();
         UiState {
             tab: Some(ui_state::nav_to_str(self.nav).to_string()),
             selected_agent: Some(self.selected_chat_agent.as_str().to_string()),
             active_session_key: self.active_session_key.clone(),
             window: self.pending_window,
             settings: self.settings.clone(),
+            rooms,
+            job_rooms,
         }
     }
 
@@ -1103,6 +1145,8 @@ impl App {
                 self.bubbles.retain(|b| !b.expired(now));
                 self.transition_moments
                     .retain(|_, t| now.saturating_duration_since(*t) < TRANSITION_FLASH);
+                self.job_transition_moments
+                    .retain(|_, t| now.saturating_duration_since(*t) < TRANSITION_FLASH);
                 // Debounced window-state flush. Only write once the
                 // operator has stopped dragging / resizing for the
                 // debounce interval — otherwise a resize produces
@@ -1133,16 +1177,12 @@ impl App {
                 // also animate via the scrolling scanline when not
                 // disabled. `Tick` itself throttles the rate, so
                 // clearing the cache here is cheap.
-                let has_active_channels = self.roster.iter().any(|a| {
-                    matches!(a.kind, AgentKind::Channel)
-                        && !matches!(
-                            self.statuses
-                                .get(&a.id)
-                                .copied()
-                                .unwrap_or(AgentStatus::Unknown),
-                            AgentStatus::Disabled,
-                        )
+                let has_active_channels = self.jobs.values().any(|j| {
+                    matches!(j.kind, JobKind::Channel) && !matches!(j.status, AgentStatus::Disabled)
                 });
+                // Age out spent flourishes so the canvas stops clearing
+                // once they're all done.
+                self.flourishes.retain(|f| !f.expired(now));
                 if self.bubbles.len() != before
                     || !self.bubbles.is_empty()
                     || self.any_sprite_animating(now)
@@ -1191,50 +1231,47 @@ impl App {
             WsEvent::CronSnapshot(crons) => {
                 self.last_poll = Some(Instant::now());
                 for cron in &crons {
-                    let id = events::cron_agent_id(cron);
-                    self.ensure_agent(&id, AgentKind::Cron);
-                    self.cron_details.insert(id.clone(), cron.state.clone());
+                    let agent_id = events::cron_agent_id(cron);
+                    let job_id = JobId::new(agent_id.as_str());
+                    self.ensure_job(&job_id, JobKind::Cron);
+                    self.cron_details
+                        .insert(agent_id.clone(), cron.state.clone());
                     if let Some(uuid) = cron.id.as_deref() {
-                        self.cron_ids.insert(id.clone(), uuid.to_string());
+                        self.cron_ids.insert(agent_id.clone(), uuid.to_string());
                     }
-                    // Notify if this cron is reporting an error —
-                    // Notifier's dedup keeps repeated heartbeats
-                    // quiet.
-                    self.notifier.cron_state_changed(&id, &cron.state);
+                    self.notifier.cron_state_changed(&agent_id, &cron.state);
                     let status = events::cron_status(cron);
-                    self.apply_status_update(id, status);
+                    self.apply_job_status(&job_id, status);
                 }
             }
             WsEvent::CronDelta(cron) => {
                 self.last_poll = Some(Instant::now());
-                let id = events::cron_agent_id(&cron);
-                self.ensure_agent(&id, AgentKind::Cron);
+                let agent_id = events::cron_agent_id(&cron);
+                let job_id = JobId::new(agent_id.as_str());
+                self.ensure_job(&job_id, JobKind::Cron);
                 // Merge rather than replace — push events only carry
                 // the fields that changed, so a `finished` delta
                 // shouldn't wipe the unrelated `nextRunAtMs` from the
                 // previous snapshot.
                 merge_cron_state(
-                    self.cron_details.entry(id.clone()).or_default(),
+                    self.cron_details.entry(agent_id.clone()).or_default(),
                     &cron.state,
                 );
-                // Notify from the merged state (not the delta alone)
-                // so a `finished` event with no `last_error` set
-                // doesn't accidentally clear dedup when we still
-                // have the error text from the snapshot.
-                if let Some(merged) = self.cron_details.get(&id) {
-                    self.notifier.cron_state_changed(&id, merged);
+                if let Some(merged) = self.cron_details.get(&agent_id) {
+                    self.notifier.cron_state_changed(&agent_id, merged);
                 }
                 let status = events::cron_status(&cron);
-                self.apply_status_update(id, status);
+                self.apply_job_status(&job_id, status);
             }
             WsEvent::ChannelSnapshot(channels) => {
                 self.last_poll = Some(Instant::now());
                 for ch in &channels {
-                    let id = events::channel_agent_id(ch);
-                    self.ensure_agent(&id, AgentKind::Channel);
-                    self.channel_details.insert(id.clone(), ch.clone());
+                    let agent_id = events::channel_agent_id(ch);
+                    let job_id = JobId::new(agent_id.as_str());
+                    self.ensure_job(&job_id, JobKind::Channel);
+                    self.channel_details.insert(agent_id.clone(), ch.clone());
                     let status = events::channel_status(ch);
-                    self.apply_status_update(id, status);
+                    self.apply_job_status(&job_id, status);
                 }
             }
             WsEvent::MainAgent(main) => {
@@ -1270,8 +1307,7 @@ impl App {
                             persona = %persona,
                             "roster: add chat agent",
                         );
-                        self.roster
-                            .push(Agent::main_with_display(&info.id, &persona));
+                        self.roster.push(Agent::new(&info.id, &persona));
                         self.scene_cache.clear();
                     }
                 }
@@ -1373,7 +1409,7 @@ impl App {
                 // Ensure a sprite exists in case this agent's
                 // `session.message` arrives before `agents.list`
                 // populates the roster (race on first connect).
-                self.ensure_agent(&agent_id, AgentKind::Main);
+                self.ensure_agent(&agent_id);
                 // Reply lands → activity indicator goes away.
                 self.chat_activities.remove(&agent_id);
                 // Bump unread count if the operator isn't actively
@@ -1619,32 +1655,61 @@ impl App {
         }
     }
 
-    /// Ensure a sprite exists in the roster for `id`. First-time seen
-    /// IDs (cron rename on the gateway, a new channel provider) get a
-    /// fresh `Agent` with a deterministic color and the canvas cache is
-    /// cleared so the sprite is painted this frame.
-    fn ensure_agent(&mut self, id: &AgentId, kind: AgentKind) {
+    /// Ensure a chat-capable agent sprite exists for `id`. Used on
+    /// routes other than `agents.list` (e.g. `session.message` racing
+    /// the list RPC) so the sprite appears immediately; a later
+    /// AgentsList event upgrades `display` with the full persona.
+    fn ensure_agent(&mut self, id: &AgentId) {
         if self.roster.iter().any(|a| a.id == *id) {
             return;
         }
-        let agent = match kind {
-            AgentKind::Cron => Agent::cron(id.as_str()),
-            AgentKind::Channel => Agent::channel(id.as_str()),
-            // A second Main agent showing up via a route other than
-            // `agents.list` (e.g. an agent-scoped session.message
-            // event arriving before the list RPC returned) — seed a
-            // minimal sprite now; the subsequent AgentsList event
-            // will upgrade `display` with the persona name/emoji.
-            AgentKind::Main => Agent::main_with_display(id.as_str(), id.as_str()),
-        };
-        tracing::info!(id = %id.as_str(), kind = ?kind, "roster: new agent");
-        self.roster.push(agent);
+        tracing::info!(id = %id.as_str(), "roster: new agent");
+        self.roster.push(Agent::new(id.as_str(), id.as_str()));
         self.scene_cache.clear();
+    }
+
+    /// Ensure a Job entry exists for this id+kind. Inserts with
+    /// `Unknown` status — callers follow up with `apply_job_status`.
+    fn ensure_job(&mut self, id: &JobId, kind: JobKind) {
+        if self.jobs.contains_key(id) {
+            return;
+        }
+        let job = match kind {
+            JobKind::Cron => Job::cron(id.as_str()),
+            JobKind::Channel => Job::channel(id.as_str()),
+        };
+        tracing::info!(id = %id.as_str(), kind = ?kind, "jobs: new entry");
+        self.jobs.insert(id.clone(), job);
+        self.scene_cache.clear();
+    }
+
+    /// Update a job's status, record a transition flash if it
+    /// changed, and spawn a work-flourish pulse when a cron flips
+    /// from not-Running → Running (the operator-visible "it's doing
+    /// something" signal).
+    fn apply_job_status(&mut self, id: &JobId, next: AgentStatus) {
+        let prev = self.jobs.get(id).map(|j| j.status);
+        if prev == Some(next) {
+            return;
+        }
+        if let Some(job) = self.jobs.get_mut(id) {
+            job.status = next;
+        }
+        self.job_transition_moments
+            .insert(id.clone(), Instant::now());
+        let started = prev != Some(AgentStatus::Running) && next == AgentStatus::Running;
+        if started
+            && let Some(job) = self.jobs.get(id)
+            && matches!(job.kind, JobKind::Cron)
+        {
+            self.flourishes
+                .push(crate::scene::Flourish::spawn(id.clone()));
+        }
     }
 
     /// True when any sprite is in a state that drives per-frame
     /// redraws — a Running agent bobs, and any just-transitioned
-    /// agent pulses a ring flash for [`TRANSITION_FLASH`].
+    /// agent or job pulses a ring flash for [`TRANSITION_FLASH`].
     fn any_sprite_animating(&self, now: Instant) -> bool {
         if self
             .statuses
@@ -1653,26 +1718,42 @@ impl App {
         {
             return true;
         }
+        if self
+            .jobs
+            .values()
+            .any(|j| matches!(j.status, AgentStatus::Running))
+        {
+            return true;
+        }
+        if !self.flourishes.is_empty() {
+            return true;
+        }
         self.transition_moments
             .values()
+            .chain(self.job_transition_moments.values())
             .any(|t| now.saturating_duration_since(*t) < TRANSITION_FLASH)
     }
 
     /// True when the scene has sprites that cycle frames even at
-    /// idle — Main humanoids and Crons both alternate walk frames
+    /// idle — Main agents and Cron jobs both alternate walk frames
     /// slowly. Used to pick a medium tick rate (not flat-out 33ms,
     /// but fast enough to show the cycle).
     fn any_sprite_idle_cycling(&self) -> bool {
-        self.roster.iter().any(|a| {
-            matches!(a.kind, AgentKind::Main | AgentKind::Cron)
-                && !matches!(
-                    self.statuses
-                        .get(&a.id)
-                        .copied()
-                        .unwrap_or(AgentStatus::Unknown),
-                    AgentStatus::Disabled,
-                )
-        })
+        let agents_cycling = self.roster.iter().any(|a| {
+            !matches!(
+                self.statuses
+                    .get(&a.id)
+                    .copied()
+                    .unwrap_or(AgentStatus::Unknown),
+                AgentStatus::Disabled,
+            )
+        });
+        if agents_cycling {
+            return true;
+        }
+        self.jobs
+            .values()
+            .any(|j| matches!(j.kind, JobKind::Cron) && !matches!(j.status, AgentStatus::Disabled))
     }
 
     /// Best display string for the currently-selected chat agent —
@@ -1703,6 +1784,7 @@ impl App {
             NavItem::Overview => self.overview(),
             NavItem::Agents => agents_view::view(agents_view::AgentsViewSnapshot {
                 roster: &self.roster,
+                jobs: &self.jobs,
                 statuses: &self.statuses,
                 cron_details: &self.cron_details,
                 cron_ids: &self.cron_ids,
@@ -1784,9 +1866,14 @@ impl App {
     fn overview(&self) -> Element<'_, Message> {
         let scene = OfficeScene {
             roster: &self.roster,
+            jobs: &self.jobs,
             statuses: &self.statuses,
+            rooms: &self.rooms,
+            job_rooms: &self.job_rooms,
             bubbles: &self.bubbles,
+            flourishes: &self.flourishes,
             transition_moments: &self.transition_moments,
+            job_transition_moments: &self.job_transition_moments,
             cache: &self.scene_cache,
         };
 
@@ -1820,7 +1907,7 @@ impl App {
             .and_then(|i| i.total_tokens.zip(i.context_tokens));
         let status = status_bar::view(status_bar::Snapshot {
             connected: self.connected,
-            agents_tracked: self.statuses.len(),
+            agents_tracked: self.statuses.len() + self.jobs.len(),
             last_poll: self.last_poll,
             active_model: self.active_model.as_deref(),
             last_disconnect: self.last_disconnect.as_deref(),
