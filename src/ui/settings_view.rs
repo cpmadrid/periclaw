@@ -18,12 +18,16 @@
 //! a Clear button. That way the secret isn't exposed to the view
 //! layer or to any subsequent re-render of the widget tree.
 
-use iced::widget::{Space, button, column, container, radio, row, text, text_input};
+use std::collections::HashMap;
+
+use iced::widget::{Space, button, column, container, pick_list, radio, row, text, text_input};
 use iced::{Alignment, Border, Element, Length, Padding};
 
 use crate::Message;
 use crate::app::{ConnectionStatus, SettingsForm};
+use crate::domain::{Agent, AgentId, Room};
 use crate::ui::theme;
+use crate::ui::widgets::card_style;
 use crate::ui_state::Settings;
 
 pub struct Snapshot<'a> {
@@ -43,6 +47,13 @@ pub struct Snapshot<'a> {
     /// live feedback on Save instead of having to infer from the
     /// status bar whether their settings actually work.
     pub connection_status: &'a ConnectionStatus,
+    /// Live room list for the Rooms editor section.
+    pub rooms: &'a [Room],
+    /// Current chat-capable agents and their per-agent home-room
+    /// overrides. Used by the Agent rooms section to render one row
+    /// per agent with a `pick_list` of room labels.
+    pub roster: &'a [Agent],
+    pub agent_rooms: &'a HashMap<AgentId, String>,
 }
 
 pub fn view<'a>(snap: Snapshot<'a>) -> Element<'a, Message> {
@@ -74,9 +85,169 @@ pub fn view<'a>(snap: Snapshot<'a>) -> Element<'a, Message> {
         snap.storage_location,
     ));
     body = body.push(save_row(&snap));
+    body = body.push(rooms_section(snap.rooms));
+    body = body.push(agent_rooms_section(
+        snap.roster,
+        snap.rooms,
+        snap.agent_rooms,
+    ));
     body = body.push(footer_hint(snap.settings));
 
     container(body).width(Length::Fill).into()
+}
+
+fn rooms_section<'a>(rooms: &'a [Room]) -> Element<'a, Message> {
+    let row_count = rooms.len();
+    let row_iter = rooms.iter().enumerate().map(|(idx, room)| {
+        let id_for_label = room.id.clone();
+        let id_for_up = room.id.clone();
+        let id_for_down = room.id.clone();
+        let id_for_del = room.id.clone();
+        let label_input = text_input("room name", &room.label)
+            .on_input(move |v| Message::RoomLabelChanged(id_for_label.clone(), v))
+            .size(13)
+            .padding(Padding::from([4, 8]))
+            .width(Length::Fill);
+
+        let up = button(text("↑").size(11))
+            .padding(Padding::from([2, 8]))
+            .on_press_maybe((idx > 0).then(|| Message::RoomMoveUp(id_for_up.clone())));
+        let down = button(text("↓").size(11))
+            .padding(Padding::from([2, 8]))
+            .on_press_maybe(
+                (idx + 1 < row_count).then(|| Message::RoomMoveDown(id_for_down.clone())),
+            );
+        let del = button(text("✕").size(11))
+            .padding(Padding::from([2, 8]))
+            .on_press_maybe((row_count > 1).then(|| Message::RoomDelete(id_for_del.clone())));
+
+        row![up, down, label_input, del]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into()
+    });
+
+    let list: iced::widget::Column<'a, Message> = row_iter
+        .fold(column![].spacing(6), |acc, el: Element<'a, Message>| {
+            acc.push(el)
+        });
+
+    let add = button(text("+ Add room").size(12))
+        .padding(Padding::from([4, 10]))
+        .on_press(Message::RoomAdd);
+
+    let card = container(
+        column![
+            text("Rooms").size(13).color(*theme::FOREGROUND),
+            text(
+                "Rename, reorder, add, or remove rooms. Changes persist \
+                 immediately. At least one room is required.",
+            )
+            .size(11)
+            .color(*theme::MUTED),
+            list,
+            row![Space::new().width(Length::Fill), add].align_y(Alignment::Center),
+        ]
+        .spacing(8),
+    )
+    .padding(Padding::from([12, 14]))
+    .style(card_style(6.0));
+
+    card.into()
+}
+
+fn agent_rooms_section<'a>(
+    roster: &'a [Agent],
+    rooms: &'a [Room],
+    agent_rooms: &'a HashMap<AgentId, String>,
+) -> Element<'a, Message> {
+    // `pick_list` values must be Clone + Eq + Display. RoomOption
+    // wraps (id, label) so the display string is the human label
+    // while the stable id is what we dispatch.
+    let options: Vec<RoomOption> = rooms
+        .iter()
+        .map(|r| RoomOption {
+            id: r.id.clone(),
+            label: r.label.clone(),
+        })
+        .collect();
+
+    let row_iter = roster.iter().map(|agent| {
+        let current_id = agent_rooms
+            .get(&agent.id)
+            .cloned()
+            .unwrap_or_else(|| crate::domain::room::MAIN_ROOM.to_string());
+        let selected = options.iter().find(|o| o.id == current_id).cloned();
+        let agent_id = agent.id.clone();
+        let pl = pick_list(options.clone(), selected, move |opt: RoomOption| {
+            Message::AgentHomeRoomChanged(agent_id.clone(), opt.id)
+        })
+        .placeholder("choose room")
+        .padding(Padding::from([4, 8]))
+        .text_size(12);
+        row![
+            text(agent.display.as_str())
+                .size(13)
+                .color(*theme::FOREGROUND)
+                .width(Length::Fill),
+            pl,
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+    });
+
+    let list: iced::widget::Column<'a, Message> = row_iter
+        .fold(column![].spacing(6), |acc, el: Element<'a, Message>| {
+            acc.push(el)
+        });
+
+    let body = if roster.is_empty() {
+        column![
+            text("Agents").size(13).color(*theme::FOREGROUND),
+            text("No agents discovered yet.")
+                .size(11)
+                .color(*theme::MUTED),
+        ]
+        .spacing(8)
+    } else {
+        column![
+            text("Agents").size(13).color(*theme::FOREGROUND),
+            text("Pick which room each agent calls home.")
+                .size(11)
+                .color(*theme::MUTED),
+            list,
+        ]
+        .spacing(8)
+    };
+
+    container(body)
+        .padding(Padding::from([12, 14]))
+        .style(card_style(6.0))
+        .into()
+}
+
+/// Display wrapper for the agent-room `pick_list`. `Display` returns
+/// the human label; equality is by stable room id so reordering or
+/// renaming doesn't break selection matching.
+#[derive(Debug, Clone)]
+struct RoomOption {
+    id: String,
+    label: String,
+}
+
+impl PartialEq for RoomOption {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for RoomOption {}
+
+impl std::fmt::Display for RoomOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
 }
 
 fn first_run_banner<'a>() -> Element<'a, Message> {

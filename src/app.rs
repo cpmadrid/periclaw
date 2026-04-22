@@ -155,6 +155,25 @@ pub enum Message {
     /// OS keychain AND the plaintext fallback file, regardless of
     /// build flavor — Clear means clear everywhere.
     SettingsClearToken,
+    /// Rename a room. Room id stays stable so per-agent room
+    /// preferences don't get orphaned; only the label changes.
+    RoomLabelChanged(String, String),
+    /// Move a room one slot higher (swap with its predecessor). No-op
+    /// when already at index 0.
+    RoomMoveUp(String),
+    /// Move a room one slot lower (swap with its successor). No-op
+    /// when already at the last index.
+    RoomMoveDown(String),
+    /// Append a fresh room with a placeholder label. The operator
+    /// renames it via the inline label input.
+    RoomAdd,
+    /// Remove a room by id. Agents whose `agent_rooms` pointed at the
+    /// deleted room fall back to `MAIN_ROOM` implicitly on next draw.
+    /// Guarded against removing the last remaining room.
+    RoomDelete(String),
+    /// Operator picked a new home room for an agent via the Settings
+    /// pick_list. Updates `self.agent_rooms` and persists immediately.
+    AgentHomeRoomChanged(AgentId, String),
 }
 
 pub struct App {
@@ -231,13 +250,10 @@ pub struct App {
     /// ring-pulse animation in `OfficeScene`; entries older than
     /// [`TRANSITION_FLASH`] are pruned each tick.
     pub transition_moments: HashMap<AgentId, Instant>,
-    /// Same thing, for jobs — cron/channel state transitions (idle→
-    /// running, ok→error) flash their sprite's halo ring.
-    pub job_transition_moments: HashMap<JobId, Instant>,
-    /// Ring buffer of "work flourishes" — short-lived visual pulses
-    /// spawned when a cron transitions from idle into `Running`.
-    /// Pruned by age each tick.
-    pub flourishes: Vec<crate::scene::Flourish>,
+    /// Per-agent home-room override. Agents absent here fall back to
+    /// `room::MAIN_ROOM`. Persisted in `UiState` so operator edits
+    /// stick across restarts.
+    pub agent_rooms: HashMap<AgentId, String>,
     pub scene_cache: canvas::Cache,
     /// Cache for the Sessions tab's detail-pane sparkline. Cleared
     /// whenever the active session's points change so the canvas
@@ -536,7 +552,16 @@ impl App {
             .filter(|s| !s.is_empty())
             .map(AgentId::new)
             .unwrap_or_else(|| AgentId::new("main"));
-        let rooms = if state.rooms.is_empty() {
+        // Legacy migration: the first `rooms` release seeded a
+        // 6-room hardcoded set (observatory / command-hq / security /
+        // research-lab / memory-vault / studio). The follow-up cut
+        // that to 3 (command-deck / galley / engine-room). If the
+        // persisted state is *exactly* that legacy set (operator
+        // never edited it), auto-migrate to the new defaults so the
+        // first launch after upgrade shows the intended scene. Any
+        // customization (renamed label, added room, different order)
+        // counts as "operator wanted something specific" and stays.
+        let rooms = if state.rooms.is_empty() || is_legacy_default_rooms(&state.rooms) {
             room::default_rooms()
         } else {
             state.rooms.clone()
@@ -569,8 +594,11 @@ impl App {
             log_filters: LogFilters::default(),
             logs_auto_tail: true,
             transition_moments: HashMap::new(),
-            job_transition_moments: HashMap::new(),
-            flourishes: Vec::new(),
+            agent_rooms: state
+                .agent_rooms
+                .iter()
+                .map(|(k, v)| (AgentId::new(k.clone()), v.clone()))
+                .collect(),
             scene_cache: canvas::Cache::default(),
             sparkline_cache: canvas::Cache::default(),
             row_sparkline_caches: HashMap::new(),
@@ -703,6 +731,11 @@ impl App {
             .iter()
             .map(|(k, v)| (k.as_str().to_string(), v.clone()))
             .collect();
+        let agent_rooms: HashMap<String, String> = self
+            .agent_rooms
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.clone()))
+            .collect();
         UiState {
             tab: Some(ui_state::nav_to_str(self.nav).to_string()),
             selected_agent: Some(self.selected_chat_agent.as_str().to_string()),
@@ -711,6 +744,7 @@ impl App {
             settings: self.settings.clone(),
             rooms,
             job_rooms,
+            agent_rooms,
         }
     }
 
@@ -1139,13 +1173,69 @@ impl App {
                 self.cached_token = None;
                 Task::none()
             }
+            Message::RoomLabelChanged(id, label) => {
+                if let Some(room) = self.rooms.iter_mut().find(|r| r.id == id) {
+                    room.label = label;
+                    ui_state::save(&self.ui_state_snapshot());
+                    self.scene_cache.clear();
+                }
+                Task::none()
+            }
+            Message::RoomMoveUp(id) => {
+                if let Some(idx) = self.rooms.iter().position(|r| r.id == id)
+                    && idx > 0
+                {
+                    self.rooms.swap(idx, idx - 1);
+                    ui_state::save(&self.ui_state_snapshot());
+                    self.scene_cache.clear();
+                }
+                Task::none()
+            }
+            Message::RoomMoveDown(id) => {
+                if let Some(idx) = self.rooms.iter().position(|r| r.id == id)
+                    && idx + 1 < self.rooms.len()
+                {
+                    self.rooms.swap(idx, idx + 1);
+                    ui_state::save(&self.ui_state_snapshot());
+                    self.scene_cache.clear();
+                }
+                Task::none()
+            }
+            Message::RoomAdd => {
+                // Generate a short unique id. UUIDs are already in
+                // the dep tree (used for idempotency keys); grab the
+                // first 8 chars so the id stays human-readable in
+                // logs and state files.
+                let short = uuid::Uuid::new_v4().simple().to_string();
+                let id = format!("room-{}", &short[..8]);
+                self.rooms.push(crate::domain::Room::new(id, "New room"));
+                ui_state::save(&self.ui_state_snapshot());
+                self.scene_cache.clear();
+                Task::none()
+            }
+            Message::RoomDelete(id) => {
+                if self.rooms.len() > 1 {
+                    self.rooms.retain(|r| r.id != id);
+                    // Drop any agent-room override that pointed at
+                    // the deleted room so the agent falls back to
+                    // `MAIN_ROOM` cleanly.
+                    self.agent_rooms.retain(|_, v| *v != id);
+                    ui_state::save(&self.ui_state_snapshot());
+                    self.scene_cache.clear();
+                }
+                Task::none()
+            }
+            Message::AgentHomeRoomChanged(agent_id, room_id) => {
+                self.agent_rooms.insert(agent_id, room_id);
+                ui_state::save(&self.ui_state_snapshot());
+                self.scene_cache.clear();
+                Task::none()
+            }
             Message::Tick => {
                 let now = Instant::now();
                 let before = self.bubbles.len();
                 self.bubbles.retain(|b| !b.expired(now));
                 self.transition_moments
-                    .retain(|_, t| now.saturating_duration_since(*t) < TRANSITION_FLASH);
-                self.job_transition_moments
                     .retain(|_, t| now.saturating_duration_since(*t) < TRANSITION_FLASH);
                 // Debounced window-state flush. Only write once the
                 // operator has stopped dragging / resizing for the
@@ -1177,17 +1267,10 @@ impl App {
                 // also animate via the scrolling scanline when not
                 // disabled. `Tick` itself throttles the rate, so
                 // clearing the cache here is cheap.
-                let has_active_channels = self.jobs.values().any(|j| {
-                    matches!(j.kind, JobKind::Channel) && !matches!(j.status, AgentStatus::Disabled)
-                });
-                // Age out spent flourishes so the canvas stops clearing
-                // once they're all done.
-                self.flourishes.retain(|f| !f.expired(now));
                 if self.bubbles.len() != before
                     || !self.bubbles.is_empty()
                     || self.any_sprite_animating(now)
                     || self.any_sprite_idle_cycling()
-                    || has_active_channels
                 {
                     self.scene_cache.clear();
                 }
@@ -1683,10 +1766,10 @@ impl App {
         self.scene_cache.clear();
     }
 
-    /// Update a job's status, record a transition flash if it
-    /// changed, and spawn a work-flourish pulse when a cron flips
-    /// from not-Running → Running (the operator-visible "it's doing
-    /// something" signal).
+    /// Update a job's status. On transitions into `Running`, spawn a
+    /// "working on X" bubble over the agent that owns the job. On
+    /// transitions out of `Running`, drop any Work bubble anchored to
+    /// the same job so the overlay doesn't linger past completion.
     fn apply_job_status(&mut self, id: &JobId, next: AgentStatus) {
         let prev = self.jobs.get(id).map(|j| j.status);
         if prev == Some(next) {
@@ -1695,21 +1778,39 @@ impl App {
         if let Some(job) = self.jobs.get_mut(id) {
             job.status = next;
         }
-        self.job_transition_moments
-            .insert(id.clone(), Instant::now());
-        let started = prev != Some(AgentStatus::Running) && next == AgentStatus::Running;
-        if started
-            && let Some(job) = self.jobs.get(id)
-            && matches!(job.kind, JobKind::Cron)
+        let now_running = next == AgentStatus::Running;
+        let was_running = prev == Some(AgentStatus::Running);
+        let job_display = self.jobs.get(id).map(|j| j.display.clone());
+        let agent_id = self.primary_agent_id();
+
+        if now_running
+            && !was_running
+            && let (Some(label), Some(agent)) = (job_display.as_ref(), agent_id.as_ref())
         {
-            self.flourishes
-                .push(crate::scene::Flourish::spawn(id.clone()));
+            let text = format!("working on {label}");
+            self.bubbles.push(ThoughtBubble::work(agent.clone(), text));
+        } else if !now_running
+            && was_running
+            && let Some(label) = job_display.as_ref()
+        {
+            // Clear the Work bubble for this job once it settles.
+            let prefix = format!("working on {label}");
+            self.bubbles.retain(|b| {
+                !(matches!(b.kind, crate::scene::BubbleKind::Work) && b.text == prefix)
+            });
         }
+    }
+
+    /// Pick the agent that currently hosts all jobs. Until we wire a
+    /// real per-job → agent mapping, everything belongs to the first
+    /// agent in the roster (Sebastian in practice).
+    fn primary_agent_id(&self) -> Option<AgentId> {
+        self.roster.first().map(|a| a.id.clone())
     }
 
     /// True when any sprite is in a state that drives per-frame
     /// redraws — a Running agent bobs, and any just-transitioned
-    /// agent or job pulses a ring flash for [`TRANSITION_FLASH`].
+    /// agent pulses a ring flash for [`TRANSITION_FLASH`].
     fn any_sprite_animating(&self, now: Instant) -> bool {
         if self
             .statuses
@@ -1725,12 +1826,8 @@ impl App {
         {
             return true;
         }
-        if !self.flourishes.is_empty() {
-            return true;
-        }
         self.transition_moments
             .values()
-            .chain(self.job_transition_moments.values())
             .any(|t| now.saturating_duration_since(*t) < TRANSITION_FLASH)
     }
 
@@ -1825,6 +1922,9 @@ impl App {
                 token_present: self.token_present,
                 storage_location: secret_store::storage_location_hint(),
                 connection_status: &self.connection_status,
+                rooms: &self.rooms,
+                roster: &self.roster,
+                agent_rooms: &self.agent_rooms,
             }),
         };
 
@@ -1869,11 +1969,9 @@ impl App {
             jobs: &self.jobs,
             statuses: &self.statuses,
             rooms: &self.rooms,
-            job_rooms: &self.job_rooms,
+            agent_rooms: &self.agent_rooms,
             bubbles: &self.bubbles,
-            flourishes: &self.flourishes,
             transition_moments: &self.transition_moments,
-            job_transition_moments: &self.job_transition_moments,
             cache: &self.scene_cache,
         };
 
@@ -1905,6 +2003,15 @@ impl App {
             .sessions
             .get("agent:main:main")
             .and_then(|i| i.total_tokens.zip(i.context_tokens));
+        // Running jobs, sorted by id so the label is stable across
+        // redraws even when HashMap iteration order changes.
+        let mut running_jobs: Vec<&str> = self
+            .jobs
+            .values()
+            .filter(|j| matches!(j.status, AgentStatus::Running))
+            .map(|j| j.display.as_str())
+            .collect();
+        running_jobs.sort();
         let status = status_bar::view(status_bar::Snapshot {
             connected: self.connected,
             agents_tracked: self.statuses.len() + self.jobs.len(),
@@ -1917,6 +2024,7 @@ impl App {
                 .gateway_update
                 .as_ref()
                 .map(|u| (u.current.as_str(), u.latest.as_str())),
+            running_jobs,
         });
 
         let mut col = iced::widget::column![].spacing(0);
@@ -2041,6 +2149,28 @@ fn merge_cron_state(dst: &mut CronState, src: &CronState) {
     if src.last_error.is_some() {
         dst.last_error = src.last_error.clone();
     }
+}
+
+/// Detect whether a persisted rooms list matches the legacy 6-room
+/// hardcoded default from before we cut to three rooms. Operators
+/// who never customized are the only ones that'd have this exact
+/// set, so it's safe to reseed on their behalf.
+fn is_legacy_default_rooms(rooms: &[Room]) -> bool {
+    const LEGACY: &[(&str, &str)] = &[
+        ("observatory", "Observatory"),
+        ("command-hq", "Command HQ"),
+        ("security", "Security"),
+        ("research-lab", "Research Lab"),
+        ("memory-vault", "Memory Vault"),
+        ("studio", "Studio"),
+    ];
+    if rooms.len() != LEGACY.len() {
+        return false;
+    }
+    rooms
+        .iter()
+        .zip(LEGACY.iter())
+        .all(|(r, (id, label))| r.id == *id && r.label == *label)
 }
 
 fn clean_bubble_text(raw: &str, max: usize) -> String {

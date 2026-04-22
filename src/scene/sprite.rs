@@ -473,7 +473,11 @@ pub fn draw_lobster(
 
 /// CRT monitor — screen + stand. Single-frame because it's a
 /// machine; the screen "glow" is added at draw time as a scrolling
-/// scanline effect so static data still feels alive.
+/// scanline effect so static data still feels alive. Currently
+/// unused on the canvas (channels no longer render as sprites) but
+/// kept around for tests and in case we re-introduce monitor-style
+/// visuals for another kind of entity.
+#[allow(dead_code)]
 pub const MONITOR: Sprite = Sprite {
     frames: &[&[
         "xxxxxxxxxxxxxx",
@@ -493,18 +497,37 @@ pub const MONITOR: Sprite = Sprite {
 };
 
 /// Pick the decor sprite for a given room. Returned as `Option` so
-/// callers can skip rooms we haven't designed decor for yet.
+/// callers can skip rooms we haven't designed decor for yet. The
+/// new default rooms (Command Deck / Galley / Engine Room) get decor
+/// mapped from the legacy set — `console` feels right for the deck,
+/// `archive` reads as a galley pantry, and `beakers` for the engine
+/// room. Legacy room ids kept in the match so operators with old
+/// state files don't lose their decor overnight.
 pub fn decor_for_room(room_id: &str) -> Option<&'static Sprite> {
     match room_id {
+        "command-deck" | "command-hq" => Some(&CONSOLE),
+        "galley" | "memory-vault" => Some(&ARCHIVE),
+        "engine-room" | "research-lab" => Some(&BEAKERS),
         "observatory" => Some(&TELESCOPE),
-        "command-hq" => Some(&CONSOLE),
         "security" => Some(&CABINET),
-        "research-lab" => Some(&BEAKERS),
-        "memory-vault" => Some(&ARCHIVE),
         "studio" => Some(&MICROPHONE),
         _ => None,
     }
 }
+
+/// Floating "work in progress" indicator — a four-point star / spark
+/// that bobs above an agent while any of their jobs is running. Two
+/// frames so the sparkle pulses without extra animation code.
+pub const POWER_UP: Sprite = Sprite {
+    frames: &[
+        &[
+            "...x...", "..xXx..", ".xXXXx.", "xXXXXXx", ".xXXXx.", "..xXx..", "...x...",
+        ],
+        &[
+            "...x...", "...X...", "..XXX..", "xXXXXXx", "..XXX..", "...X...", "...x...",
+        ],
+    ],
+};
 
 /// Pick a reasonable scale (pixels per cell) for a sprite that fits
 /// within the room slot. 3px per cell is the sweet spot — any larger
@@ -600,7 +623,8 @@ pub fn draw_sprite_pixels(
 /// Overlay a scrolling scanline on top of a sprite's screen area to
 /// sell "CRT is on". Only the monitor sprite uses this; callers pick
 /// which rows are "screen" (typically rows 3..8 of the monitor).
-#[allow(clippy::too_many_arguments)]
+/// Unused on the active canvas path; kept alongside `MONITOR`.
+#[allow(clippy::too_many_arguments, dead_code)]
 pub fn draw_scanline(
     frame: &mut canvas::Frame,
     center: Point,
