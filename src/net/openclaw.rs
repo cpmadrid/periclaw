@@ -1277,7 +1277,20 @@ async fn handle_event(
                     return Ok(());
                 }
             };
-            if let Some(kind) = agent_stream_to_activity(&evt.stream) {
+            // `lifecycle` needs phase to tell start (Thinking) from
+            // end (Idle) / error (Errored). For other streams use the
+            // pure stream→kind mapping.
+            let kind = if evt.stream == "lifecycle" {
+                match evt.data.phase.as_deref() {
+                    Some("start") => Some(ActivityKind::Thinking),
+                    Some("end") => Some(ActivityKind::Idle),
+                    Some("error") => Some(ActivityKind::Errored),
+                    _ => None,
+                }
+            } else {
+                agent_stream_to_activity(&evt.stream)
+            };
+            if let Some(kind) = kind {
                 let agent_id = evt
                     .session_key
                     .as_deref()
@@ -1313,9 +1326,40 @@ async fn handle_event(
                 .and_then(|m| m.get("role"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            // Route by sessionKey so a reply from a non-default agent
+            // lands in the right chat log / over the right sprite.
+            // Fallback to `main` if the key is missing or malformed —
+            // older gateway builds and some internal tests don't set
+            // it on every broadcast.
+            let session_key = payload
+                .get("sessionKey")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let agent_id_str = agent_id_from_session_key(session_key)
+                .unwrap_or(CHAT_AGENT_ID)
+                .to_string();
+            if role == "user" {
+                // External-channel inbound (Slack / Telegram /
+                // WhatsApp DM). Mirrors operator-side SendChat:
+                // signals "agent is about to process" so the scene
+                // can light the sparkle for the duration of the run,
+                // not just for tool calls.
+                tracing::debug!(
+                    agent = %agent_id_str,
+                    session_key,
+                    "session.message user inbound — lighting sparkle",
+                );
+                let _ = out
+                    .send(WsEvent::AgentInboundUserMessage {
+                        agent_id: AgentId::new(agent_id_str),
+                    })
+                    .await;
+                return Ok(());
+            }
             if role != "assistant" {
-                // Skip user / system / tool messages — we're surfacing
-                // agent output, not operator input.
+                // Skip system / tool messages — we're surfacing
+                // agent output and inbound user prompts, not
+                // server-side scaffolding.
                 return Ok(());
             }
             // OpenClaw fires `session.message` twice per assistant turn
@@ -1356,18 +1400,6 @@ async fn handle_event(
             if text.trim().is_empty() {
                 return Ok(());
             }
-            // Route by sessionKey so a reply from a non-default agent
-            // lands in the right chat log / over the right sprite.
-            // Fallback to `main` if the key is missing or malformed —
-            // older gateway builds and some internal tests don't set
-            // it on every broadcast.
-            let session_key = payload
-                .get("sessionKey")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let agent_id_str = agent_id_from_session_key(session_key)
-                .unwrap_or(CHAT_AGENT_ID)
-                .to_string();
             // Silent-reply sentinel handling: the server itself
             // suppresses `NO_REPLY` when delivering to external
             // channels, but `session.message` broadcasts carry the

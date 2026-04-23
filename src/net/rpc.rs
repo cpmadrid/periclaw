@@ -280,6 +280,20 @@ pub struct AgentEventPayload {
     /// generic error/lifecycle with no session context) omit it.
     #[serde(default, rename = "sessionKey")]
     pub session_key: Option<String>,
+    /// Subset of `data` we care about. `lifecycle` events carry
+    /// `data.phase` of `"start" | "end" | "error"` — the only signal
+    /// we get for "external-channel run finished" since
+    /// `session.message` doesn't fire for Slack/Telegram/WhatsApp
+    /// runs in the current gateway. Tool events also carry phase
+    /// (start/output/done) but we don't currently differentiate.
+    #[serde(default)]
+    pub data: AgentEventData,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentEventData {
+    #[serde(default)]
+    pub phase: Option<String>,
 }
 
 /// Gateway broadcast `exec.approval.requested` / `.resolved` payload.

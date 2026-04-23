@@ -1487,6 +1487,28 @@ impl App {
                     }
                 }
             }
+            WsEvent::AgentInboundUserMessage { agent_id } => {
+                self.last_poll = Some(Instant::now());
+                // Ensure a sprite exists in case the inbound arrives
+                // before `agents.list` populates the roster (race on
+                // first connect for an external-channel-only agent).
+                self.ensure_agent(&agent_id);
+                // Mirror the operator-side SendChat path
+                // (Message::SendChat above): show "thinking…" in the
+                // chat panel and flip the sprite to Running so the
+                // power-up sparkle lights for the duration of the
+                // run. Settles back to Ok when AgentMessage /
+                // AgentSilentTurn arrives.
+                self.chat_activities.insert(
+                    agent_id.clone(),
+                    ChatActivityState {
+                        kind: ChatActivity::Thinking,
+                        since: Instant::now(),
+                    },
+                );
+                self.apply_status_update_silent(agent_id, AgentStatus::Running);
+                self.scene_cache.clear();
+            }
             WsEvent::AgentMessage { agent_id, text } => {
                 self.last_poll = Some(Instant::now());
                 // Ensure a sprite exists in case this agent's
@@ -1495,6 +1517,14 @@ impl App {
                 self.ensure_agent(&agent_id);
                 // Reply lands → activity indicator goes away.
                 self.chat_activities.remove(&agent_id);
+                // Reply landed → processing is done. Settle Running
+                // back to Ok now rather than waiting for the next
+                // periodic MainAgent poll, which can be many seconds
+                // out and would leave the sparkle stuck on. Silent
+                // because the message bubble pushed a few lines down
+                // is the visible signal — a "eureka!" bubble on top
+                // just stacks unreadably.
+                self.apply_status_update_silent(agent_id.clone(), AgentStatus::Ok);
                 // Bump unread count if the operator isn't actively
                 // watching this conversation: either on a different
                 // tab, or on Chat but looking at a different agent.
@@ -1532,6 +1562,11 @@ impl App {
                 // on a reply that's never coming.
                 self.last_poll = Some(Instant::now());
                 self.chat_activities.remove(&agent_id);
+                // Same off-signal as AgentMessage above: the run
+                // ended, so extinguish the sparkle promptly. Silent
+                // — there's no message bubble to anchor a "eureka!"
+                // to and we don't want a NO_REPLY turn to celebrate.
+                self.apply_status_update_silent(agent_id, AgentStatus::Ok);
             }
             WsEvent::SessionUsageTimeseries {
                 session_key,
@@ -1631,8 +1666,24 @@ impl App {
                 let status = match kind {
                     ActivityKind::Thinking | ActivityKind::ToolCalling => AgentStatus::Running,
                     ActivityKind::Errored => AgentStatus::Error,
+                    // lifecycle:end — run finished. Settle to Ok and
+                    // extinguish the sparkle. Not Errored because
+                    // OpenClaw emits Errored separately via
+                    // lifecycle:error / stream=error.
+                    ActivityKind::Idle => AgentStatus::Ok,
                 };
-                self.apply_status_update(agent_id.clone(), status);
+                // Silent: AgentActivity fires many times per turn
+                // (lifecycle:start, then a stream of `assistant`
+                // chunks). Pushing a transition bubble per event
+                // stacks "...working..." / "eureka!" on top of the
+                // actual message bubble. Errors stay loud (handled
+                // separately below). The chat panel's "thinking…"
+                // row already conveys the in-progress signal.
+                if matches!(kind, ActivityKind::Errored) {
+                    self.apply_status_update(agent_id.clone(), status);
+                } else {
+                    self.apply_status_update_silent(agent_id.clone(), status);
+                }
                 // Don't overwrite a Tool("bash") indicator with a
                 // generic "thinking" — tool events are richer info.
                 // Still upgrade Sending → Thinking / Errored because
@@ -1647,6 +1698,14 @@ impl App {
                         // activity — the chat view renders the error
                         // as a bubble; a lingering "thinking…" row
                         // would misrepresent the state.
+                        self.chat_activities.remove(&agent_id);
+                        None
+                    }
+                    ActivityKind::Idle => {
+                        // Run done — clear "thinking…" so the chat
+                        // panel doesn't sit there spinning forever
+                        // for Slack-routed turns (no session.message
+                        // arrives to clear it on that path).
                         self.chat_activities.remove(&agent_id);
                         None
                     }
@@ -1874,6 +1933,20 @@ impl App {
         if let Some(text) = transition_text(prev, next) {
             self.bubbles.push(ThoughtBubble::new(id, text));
         }
+    }
+
+    /// Same as `apply_status_update`, but skips the transition bubble.
+    /// Use for chat-driven transitions where the chat panel + the
+    /// inbound/outbound message bubble are already the user-visible
+    /// signal — adding a "...working..." or "eureka!" bubble on top
+    /// just stacks unreadable text over the actual message.
+    fn apply_status_update_silent(&mut self, id: AgentId, next: AgentStatus) {
+        let prev = self.statuses.get(&id).copied();
+        if prev == Some(next) {
+            return;
+        }
+        self.statuses.insert(id.clone(), next);
+        self.transition_moments.insert(id, Instant::now());
     }
 
     pub fn view(&self) -> Element<'_, Message> {

@@ -37,6 +37,12 @@ pub enum WsEvent {
     },
     /// Real agent chat text — feed directly into a thought bubble.
     AgentMessage { agent_id: AgentId, text: String },
+    /// External-channel inbound message: a user (Slack, Telegram,
+    /// etc.) just sent the agent a DM. Mirrors the operator-side
+    /// `SendChat` trigger — the agent is about to process, so the
+    /// scene should light its power-up sparkle and the chat panel
+    /// should show "thinking…" until the assistant reply lands.
+    AgentInboundUserMessage { agent_id: AgentId },
     /// Agent chose not to reply this turn (OpenClaw `NO_REPLY`
     /// sentinel). Nothing to render, but we use it to clear the
     /// chat-activity indicator right away instead of waiting for the
@@ -157,6 +163,12 @@ pub enum ActivityKind {
     Thinking,
     ToolCalling,
     Errored,
+    /// Run finished — extinguish "thinking…" / sparkle. Derived from
+    /// `agent` event `stream=lifecycle, data.phase=end`. Only signal
+    /// we get for external-channel (Slack/Telegram/WhatsApp) run
+    /// completion since `session.message` doesn't broadcast for
+    /// those in the current gateway.
+    Idle,
 }
 
 /// Map a cron job's reported state to our domain status enum.
@@ -244,12 +256,16 @@ pub fn cron_job_from_event(evt: &CronEventPayload) -> Option<CronJob> {
 }
 
 /// Interpret an `agent` event `stream` string as coarse activity kind.
-/// `lifecycle` / `assistant` aren't mapped here — those surface as
-/// `AgentMessage` via the `chat` channel instead.
+///
+/// External-channel runs (Slack/Telegram/WhatsApp DM → agent) emit
+/// `assistant` (streaming reply chunks) — we map it to Thinking so
+/// the sparkle stays warm during the reply. `lifecycle` is handled
+/// separately by the dispatcher (it needs `data.phase` to tell start
+/// from end), so it's intentionally not mapped here.
 pub fn agent_stream_to_activity(stream: &str) -> Option<ActivityKind> {
     match stream {
         "tool" => Some(ActivityKind::ToolCalling),
-        "item" => Some(ActivityKind::Thinking),
+        "item" | "assistant" => Some(ActivityKind::Thinking),
         "error" => Some(ActivityKind::Errored),
         _ => None,
     }
@@ -331,7 +347,16 @@ mod tests {
             agent_stream_to_activity("error"),
             Some(ActivityKind::Errored)
         );
-        assert_eq!(agent_stream_to_activity("assistant"), None);
+        // External-channel (Slack/Telegram/WhatsApp) runs emit
+        // `assistant` chunks — map to Thinking so sparkle stays warm
+        // during the streaming reply.
+        assert_eq!(
+            agent_stream_to_activity("assistant"),
+            Some(ActivityKind::Thinking)
+        );
+        // `lifecycle` is intentionally not mapped here — the
+        // dispatcher reads `data.phase` to distinguish start (Thinking)
+        // from end (Idle) / error (Errored).
         assert_eq!(agent_stream_to_activity("lifecycle"), None);
     }
 
