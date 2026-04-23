@@ -39,7 +39,7 @@ use crate::secret_store;
 /// Resolve the gateway URL. Env var wins, persisted setting (pass
 /// `Some(state.settings.gateway_url.as_deref())`) is the fallback.
 /// Returns `None` when neither is set — the caller should either
-/// stay idle (ws path) or skip connecting (mock path).
+/// stay idle (ws path) or skip connecting (Demo path).
 ///
 /// The WS path is the root (`/`). Do NOT point this at
 /// `/__openclaw__/ws`, which is the canvas WS path (different

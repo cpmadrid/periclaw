@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Run — cargo run wrapper with OpenClaw mode selection.
-# Invoked via `./dev run [--release] [--mode mock|ws]`.
+# Invoked via `./dev run [--release] [--mode demo|ws]`.
 
 set -euo pipefail
 
@@ -11,7 +11,7 @@ source "${SCRIPT_DIR}/lib.sh"
 cd_to_project_root
 
 BUILD_TYPE="${BUILD_TYPE:-debug}"
-MODE="${MODE:-auto}"        # auto | mock | ws
+MODE="${MODE:-auto}"        # auto | demo | ws
 NO_BUILD="${NO_BUILD:-false}"
 LOG_TARGETS="${LOG_TARGETS:-console}"   # console | file | both
 LOG_FILE="${LOG_FILE:-}"                # empty → auto-generate under Logs/
@@ -35,23 +35,37 @@ fi
 
 # Resolve mode.
 case "$MODE" in
-    mock)
+    demo)
+        export PERICLAW_MODE=demo
+        export PERICLAW_DEMO=1
         export OPENCLAW_MOCK=1
-        mode_desc="mock (fixture scenario)"
+        mode_desc="demo (fixture scenario)"
+        ;;
+    mock)
+        export PERICLAW_MODE=demo
+        export PERICLAW_DEMO=1
+        export OPENCLAW_MOCK=1
+        mode_desc="demo (legacy mock alias)"
         ;;
     ws)
+        export PERICLAW_MODE=ws
+        unset PERICLAW_DEMO
         unset OPENCLAW_MOCK
         mode_desc="native ws"
         ;;
     auto)
-        if [[ -n "${OPENCLAW_MOCK:-}" ]]; then
-            mode_desc="mock (inherited)"
+        if [[ "${PERICLAW_MODE:-}" == "demo" || "${PERICLAW_MODE:-}" == "mock" ]]; then
+            mode_desc="demo (inherited mode)"
+        elif [[ "${PERICLAW_MODE:-}" == "ws" ]]; then
+            mode_desc="native ws (inherited mode)"
+        elif [[ -n "${PERICLAW_DEMO:-}" || -n "${OPENCLAW_MOCK:-}" ]]; then
+            mode_desc="demo (inherited)"
         else
             mode_desc="native ws"
         fi
         ;;
     *)
-        print_error "unknown --mode '$MODE' (expected: mock, ws, auto)"
+        print_error "unknown --mode '$MODE' (expected: demo, ws, auto)"
         exit 1
         ;;
 esac

@@ -15,7 +15,7 @@ use crate::net::events::{ActivityKind, GatewayUpdate};
 use crate::net::rpc::{
     AgentInfo, ApprovalEventPayload, Channel, CronState, SessionInfo, SessionUsagePoint,
 };
-use crate::net::{WsEvent, events, mock, openclaw};
+use crate::net::{WsEvent, demo, events, openclaw};
 use crate::notifications::Notifier;
 use crate::palette::{self, PaletteAction, PaletteContext, PaletteEntry};
 use crate::scene::{OfficeScene, ThoughtBubble, transition_text};
@@ -139,7 +139,7 @@ pub enum Message {
     /// Updates the in-progress form; persistence happens on
     /// [`Message::SettingsSave`].
     SettingsGatewayUrlChanged(String),
-    /// Settings-tab mode radio — `"auto" | "ws" | "mock"`.
+    /// Settings-tab mode radio — `"auto" | "ws" | "demo"`.
     SettingsModeSelected(&'static str),
     /// Settings-tab token input (masked) changed. Write-only buffer:
     /// the field is never populated from storage, and it's cleared
@@ -174,6 +174,10 @@ pub enum Message {
     /// Operator picked a new home room for an agent via the Settings
     /// pick_list. Updates `self.agent_rooms` and persists immediately.
     AgentHomeRoomChanged(AgentId, String),
+    /// Operator picked the room whose agent should surface a job's
+    /// activity indicator. Jobs still don't render as sprites; this
+    /// controls which room lights up when the job is Running.
+    JobHomeRoomChanged(JobId, String),
 }
 
 pub struct App {
@@ -424,7 +428,7 @@ pub enum ConnectionStatus {
 #[derive(Debug, Clone, Default)]
 pub struct SettingsForm {
     pub gateway_url: String,
-    /// `"auto"`, `"ws"`, or `"mock"`.
+    /// `"auto"`, `"ws"`, or `"demo"`.
     pub mode: &'static str,
     /// Write-only token input. Cleared after Save; never populated
     /// from storage. Empty string means "operator hasn't typed
@@ -448,8 +452,35 @@ impl SettingsForm {
 fn mode_as_static(mode: Option<&str>) -> &'static str {
     match mode {
         Some("ws") => "ws",
-        Some("mock") => "mock",
+        Some("demo") | Some("mock") => "demo",
         _ => "auto",
+    }
+}
+
+/// Resolve the operator-facing data-source mode. Explicit persisted
+/// selection wins over Demo env hints, but the process-level
+/// `PERICLAW_MODE` override from `./dev run --mode ...` wins over
+/// persisted Settings.
+fn demo_mode_active(settings: &Settings) -> bool {
+    if let Some(mode) = process_mode_override() {
+        return mode == "demo";
+    }
+    match mode_as_static(settings.mode.as_deref()) {
+        "demo" => true,
+        "ws" => false,
+        _ => demo::enabled(),
+    }
+}
+
+fn process_mode_override() -> Option<&'static str> {
+    mode_override_from_value(std::env::var("PERICLAW_MODE").ok().as_deref())
+}
+
+fn mode_override_from_value(value: Option<&str>) -> Option<&'static str> {
+    match value.map(str::trim) {
+        Some("demo") | Some("mock") => Some("demo"),
+        Some("ws") => Some("ws"),
+        _ => None,
     }
 }
 
@@ -523,10 +554,11 @@ impl App {
     pub fn new(state: UiState) -> Self {
         // First-run detection: if the operator has never configured a
         // gateway URL (neither persisted nor as an env var) and isn't
-        // opting into mock mode, bounce them straight to the Settings
+        // opting into Demo mode, bounce them straight to the Settings
         // tab on launch — there's nothing meaningful to show on any
         // other tab until a URL is set.
-        let first_run_incomplete = !mock::enabled()
+        let demo_mode = demo_mode_active(&state.settings);
+        let first_run_incomplete = !demo_mode
             && std::env::var("OPENCLAW_GATEWAY_URL")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
@@ -627,7 +659,7 @@ impl App {
             // configured → enters Connecting immediately so the
             // Settings view doesn't flash "(not tested)" for a split
             // second before the first WsEvent lands.
-            connection_status: if first_run_incomplete || mock::enabled() {
+            connection_status: if first_run_incomplete || demo_mode {
                 ConnectionStatus::Untested
             } else {
                 ConnectionStatus::Connecting
@@ -696,12 +728,12 @@ impl App {
         self.update(message)
     }
 
-    /// `true` when no gateway URL is configured and mock mode isn't
+    /// `true` when no gateway URL is configured and Demo mode isn't
     /// active — i.e. the app has nothing useful to connect to and
     /// the Settings tab should show a first-run banner asking the
     /// operator to configure one.
     pub fn first_run_incomplete(&self) -> bool {
-        if mock::enabled() {
+        if demo_mode_active(&self.settings) {
             return false;
         }
         if std::env::var("OPENCLAW_GATEWAY_URL")
@@ -1121,7 +1153,8 @@ impl App {
                 // state files that predate the setting don't suddenly
                 // grow a `"mode": "auto"` entry.
                 self.settings.mode = match self.settings_form.mode {
-                    "ws" | "mock" => Some(self.settings_form.mode.to_string()),
+                    "ws" | "demo" => Some(self.settings_form.mode.to_string()),
+                    "mock" => Some("demo".to_string()),
                     _ => None,
                 };
                 ui_state::save(&self.ui_state_snapshot());
@@ -1216,10 +1249,7 @@ impl App {
             Message::RoomDelete(id) => {
                 if self.rooms.len() > 1 {
                     self.rooms.retain(|r| r.id != id);
-                    // Drop any agent-room override that pointed at
-                    // the deleted room so the agent falls back to
-                    // `MAIN_ROOM` cleanly.
-                    self.agent_rooms.retain(|_, v| *v != id);
+                    self.remove_room_references(&id);
                     ui_state::save(&self.ui_state_snapshot());
                     self.scene_cache.clear();
                 }
@@ -1227,6 +1257,12 @@ impl App {
             }
             Message::AgentHomeRoomChanged(agent_id, room_id) => {
                 self.agent_rooms.insert(agent_id, room_id);
+                ui_state::save(&self.ui_state_snapshot());
+                self.scene_cache.clear();
+                Task::none()
+            }
+            Message::JobHomeRoomChanged(job_id, room_id) => {
+                self.job_rooms.insert(job_id, room_id);
                 ui_state::save(&self.ui_state_snapshot());
                 self.scene_cache.clear();
                 Task::none()
@@ -1826,9 +1862,10 @@ impl App {
     }
 
     /// Update a job's status. On transitions into `Running`, spawn a
-    /// "working on X" bubble over the agent that owns the job. On
-    /// transitions out of `Running`, drop any Work bubble anchored to
-    /// the same job so the overlay doesn't linger past completion.
+    /// "working on X" bubble over the first agent in the job's
+    /// configured room. On transitions out of `Running`, drop any Work
+    /// bubble anchored to the same job so the overlay doesn't linger
+    /// past completion.
     fn apply_job_status(&mut self, id: &JobId, next: AgentStatus) {
         let prev = self.jobs.get(id).map(|j| j.status);
         if prev == Some(next) {
@@ -1840,7 +1877,7 @@ impl App {
         let now_running = next == AgentStatus::Running;
         let was_running = prev == Some(AgentStatus::Running);
         let job_display = self.jobs.get(id).map(|j| j.display.clone());
-        let agent_id = self.primary_agent_id();
+        let agent_id = self.agent_for_job(id);
 
         if now_running
             && !was_running
@@ -1860,11 +1897,44 @@ impl App {
         }
     }
 
-    /// Pick the agent that currently hosts all jobs. Until we wire a
-    /// real per-job → agent mapping, everything belongs to the first
-    /// agent in the roster (Sebastian in practice).
-    fn primary_agent_id(&self) -> Option<AgentId> {
-        self.roster.first().map(|a| a.id.clone())
+    /// Pick the first agent whose configured room matches a job's
+    /// configured room. If no agent currently lives there, fall back
+    /// to the primary agent so the work bubble still has an anchor.
+    fn agent_for_job(&self, id: &JobId) -> Option<AgentId> {
+        let room_id = self.job_room_id(id);
+        self.roster
+            .iter()
+            .find(|agent| self.agent_room_id(agent) == room_id)
+            .or_else(|| self.roster.first())
+            .map(|agent| agent.id.clone())
+    }
+
+    fn agent_room_id<'a>(&'a self, agent: &'a Agent) -> &'a str {
+        self.agent_rooms
+            .get(&agent.id)
+            .map(String::as_str)
+            .unwrap_or(room::MAIN_ROOM)
+    }
+
+    fn job_room_id<'a>(&'a self, id: &'a JobId) -> &'a str {
+        let configured = self
+            .job_rooms
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or(room::MAIN_ROOM);
+        if self.rooms.iter().any(|room| room.id == configured) {
+            configured
+        } else {
+            room::MAIN_ROOM
+        }
+    }
+
+    /// Drop room overrides that point at a room that no longer
+    /// exists. Agents and jobs then fall back to `MAIN_ROOM` rather
+    /// than carrying dead persisted ids.
+    fn remove_room_references(&mut self, room_id: &str) {
+        self.agent_rooms.retain(|_, v| v != room_id);
+        self.job_rooms.retain(|_, v| v != room_id);
     }
 
     /// True when any sprite is in a state that drives per-frame
@@ -1998,6 +2068,8 @@ impl App {
                 rooms: &self.rooms,
                 roster: &self.roster,
                 agent_rooms: &self.agent_rooms,
+                jobs: &self.jobs,
+                job_rooms: &self.job_rooms,
             }),
         };
 
@@ -2043,6 +2115,7 @@ impl App {
             statuses: &self.statuses,
             rooms: &self.rooms,
             agent_rooms: &self.agent_rooms,
+            job_rooms: &self.job_rooms,
             bubbles: &self.bubbles,
             transition_moments: &self.transition_moments,
             cache: &self.scene_cache,
@@ -2111,14 +2184,16 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        // `OPENCLAW_MOCK=1` routes to the scripted fixture stream for UI
-        // work without a live gateway; otherwise we resolve the gateway
-        // URL (env > persisted settings) and attach a native WS
-        // subscription keyed on the URL so URL changes auto-restart it.
-        // When no URL is configured, the ws subscription stays idle
-        // until the operator saves one via the Settings tab.
-        let ws = if mock::enabled() {
-            Subscription::run(mock::connect).map(Message::Ws)
+        // Demo mode routes to the scripted fixture stream for UI work
+        // without a live gateway. Auto mode only picks Demo from env;
+        // an explicit persisted Live WS selection overrides that.
+        // Otherwise we resolve the gateway URL (env > persisted
+        // settings) and attach a native WS subscription keyed on the
+        // URL so URL changes auto-restart it. When no URL is
+        // configured, the ws subscription stays idle until the
+        // operator saves one via the Settings tab.
+        let ws = if demo_mode_active(&self.settings) {
+            Subscription::run(demo::connect).map(Message::Ws)
         } else if let Some(gateway_url) = config::gateway_url(self.settings.gateway_url.as_deref())
         {
             let params = openclaw::ConnectParams {
@@ -2333,6 +2408,315 @@ fn global_event_filter(
             }
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::{mode_as_static, mode_override_from_value};
+
+    #[test]
+    fn legacy_mock_mode_normalizes_to_demo() {
+        assert_eq!(mode_as_static(Some("mock")), "demo");
+        assert_eq!(mode_as_static(Some("demo")), "demo");
+    }
+
+    #[test]
+    fn process_mode_override_accepts_cli_modes() {
+        assert_eq!(mode_override_from_value(Some("demo")), Some("demo"));
+        assert_eq!(mode_override_from_value(Some("mock")), Some("demo"));
+        assert_eq!(mode_override_from_value(Some("ws")), Some("ws"));
+        assert_eq!(mode_override_from_value(Some("auto")), None);
+        assert_eq!(mode_override_from_value(None), None);
+    }
+}
+
+#[cfg(test)]
+mod reducer_tests {
+    use super::*;
+
+    fn app() -> App {
+        App::new(UiState {
+            settings: Settings {
+                mode: Some("demo".to_string()),
+                ..Settings::default()
+            },
+            ..UiState::default()
+        })
+    }
+
+    fn main_agent() -> AgentId {
+        AgentId::new("main")
+    }
+
+    #[test]
+    fn inbound_user_message_sets_running_and_thinking() {
+        let mut app = app();
+        let agent_id = main_agent();
+
+        app.apply_ws(WsEvent::AgentInboundUserMessage {
+            agent_id: agent_id.clone(),
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Running));
+        assert!(matches!(
+            app.chat_activities.get(&agent_id).map(|s| &s.kind),
+            Some(ChatActivity::Thinking)
+        ));
+    }
+
+    #[test]
+    fn assistant_message_clears_activity_and_sets_ok() {
+        let mut app = app();
+        let agent_id = main_agent();
+        app.apply_ws(WsEvent::AgentInboundUserMessage {
+            agent_id: agent_id.clone(),
+        });
+
+        app.apply_ws(WsEvent::AgentMessage {
+            agent_id: agent_id.clone(),
+            text: "All systems nominal.".to_string(),
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Ok));
+        assert!(!app.chat_activities.contains_key(&agent_id));
+        let log = app.chat_logs.get(&agent_id).expect("chat log exists");
+        assert_eq!(
+            log.back().map(|m| m.text.as_str()),
+            Some("All systems nominal.")
+        );
+    }
+
+    #[test]
+    fn visible_ws_turn_uses_tool_and_message_bubbles_without_transition_noise() {
+        let mut app = app();
+        let agent_id = main_agent();
+
+        app.apply_ws(WsEvent::AgentInboundUserMessage {
+            agent_id: agent_id.clone(),
+        });
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::Thinking,
+        });
+        app.apply_ws(WsEvent::AgentToolInvoked {
+            agent_id: agent_id.clone(),
+            text: "⚙ bash".to_string(),
+        });
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::ToolCalling,
+        });
+        app.apply_ws(WsEvent::AgentMessage {
+            agent_id: agent_id.clone(),
+            text: "Visible reply from ws mode.".to_string(),
+        });
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::Idle,
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Ok));
+        assert!(!app.chat_activities.contains_key(&agent_id));
+        assert!(app.bubbles.iter().any(|bubble| {
+            bubble.agent == agent_id
+                && matches!(bubble.kind, crate::scene::BubbleKind::Tool)
+                && bubble.text == "⚙ bash"
+        }));
+        assert!(app.bubbles.iter().any(|bubble| {
+            bubble.agent == agent_id
+                && matches!(bubble.kind, crate::scene::BubbleKind::Message)
+                && bubble.text == "Visible reply from ws mode."
+        }));
+        assert!(
+            !app.bubbles
+                .iter()
+                .any(|bubble| bubble.text == "...working..." || bubble.text == "eureka!"),
+            "chat-driven ws turns should rely on tool/message bubbles, not status stubs"
+        );
+    }
+
+    #[test]
+    fn lifecycle_idle_clears_activity_for_silent_runs() {
+        let mut app = app();
+        let agent_id = main_agent();
+        app.apply_ws(WsEvent::AgentInboundUserMessage {
+            agent_id: agent_id.clone(),
+        });
+
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::Idle,
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Ok));
+        assert!(!app.chat_activities.contains_key(&agent_id));
+    }
+
+    #[test]
+    fn silent_ws_turn_runs_without_spawning_message_bubbles() {
+        let mut app = app();
+        let agent_id = main_agent();
+
+        app.apply_ws(WsEvent::AgentInboundUserMessage {
+            agent_id: agent_id.clone(),
+        });
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::Thinking,
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Running));
+        assert!(
+            app.bubbles.is_empty(),
+            "silent runs should signal with status only"
+        );
+
+        app.apply_ws(WsEvent::AgentSilentTurn {
+            agent_id: agent_id.clone(),
+        });
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::Idle,
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Ok));
+        assert!(!app.chat_activities.contains_key(&agent_id));
+        assert!(
+            app.bubbles.is_empty(),
+            "silent turn should not leave a ghost bubble behind"
+        );
+    }
+
+    #[test]
+    fn generic_thinking_does_not_downgrade_tool_activity() {
+        let mut app = app();
+        let agent_id = main_agent();
+
+        app.apply_ws(WsEvent::AgentToolInvoked {
+            agent_id: agent_id.clone(),
+            text: "⚙ bash".to_string(),
+        });
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::Thinking,
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Running));
+        assert!(matches!(
+            app.chat_activities.get(&agent_id).map(|s| &s.kind),
+            Some(ChatActivity::Tool(name)) if name == "bash"
+        ));
+    }
+
+    #[test]
+    fn error_activity_is_loud_and_idle_settles_to_ok() {
+        let mut app = app();
+        let agent_id = main_agent();
+        app.statuses.insert(agent_id.clone(), AgentStatus::Ok);
+        app.chat_activities.insert(
+            agent_id.clone(),
+            ChatActivityState {
+                kind: ChatActivity::Thinking,
+                since: Instant::now(),
+            },
+        );
+
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::Errored,
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Error));
+        assert!(!app.chat_activities.contains_key(&agent_id));
+        assert!(
+            app.bubbles
+                .iter()
+                .any(|b| b.agent == agent_id && b.text == "anomaly!"),
+            "error transition should push anomaly bubble"
+        );
+
+        app.apply_ws(WsEvent::AgentActivity {
+            agent_id: agent_id.clone(),
+            kind: ActivityKind::Idle,
+        });
+
+        assert_eq!(app.statuses.get(&agent_id), Some(&AgentStatus::Ok));
+    }
+
+    #[test]
+    fn chat_history_replaces_existing_log() {
+        let mut app = app();
+        let agent_id = main_agent();
+
+        app.apply_ws(WsEvent::ChatHistory {
+            agent_id: agent_id.clone(),
+            messages: vec![ChatMessage::assistant("old")],
+        });
+        app.apply_ws(WsEvent::ChatHistory {
+            agent_id: agent_id.clone(),
+            messages: vec![ChatMessage::assistant("new")],
+        });
+
+        let log = app.chat_logs.get(&agent_id).expect("chat log exists");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.front().map(|m| m.text.as_str()), Some("new"));
+    }
+
+    #[test]
+    fn deleted_room_references_are_removed_for_agents_and_jobs() {
+        let mut app = app();
+        let agent_id = main_agent();
+        let job_id = JobId::new("demo-cron");
+        app.agent_rooms
+            .insert(agent_id.clone(), "deleted-room".to_string());
+        app.job_rooms
+            .insert(job_id.clone(), "deleted-room".to_string());
+
+        app.remove_room_references("deleted-room");
+
+        assert!(!app.agent_rooms.contains_key(&agent_id));
+        assert!(!app.job_rooms.contains_key(&job_id));
+    }
+
+    #[test]
+    fn running_job_work_bubble_uses_agent_in_configured_room() {
+        let mut app = app();
+        let side_agent = AgentId::new("sidekick");
+        let job_id = JobId::new("demo-cron");
+        app.roster.push(Agent::new("sidekick", "Sidekick"));
+        app.agent_rooms
+            .insert(side_agent.clone(), "engine-room".to_string());
+        app.job_rooms
+            .insert(job_id.clone(), "engine-room".to_string());
+        app.ensure_job(&job_id, JobKind::Cron);
+
+        app.apply_job_status(&job_id, AgentStatus::Running);
+
+        assert!(app.bubbles.iter().any(|bubble| {
+            bubble.agent == side_agent
+                && matches!(bubble.kind, crate::scene::BubbleKind::Work)
+                && bubble.text == "working on demo-cron"
+        }));
+    }
+
+    #[test]
+    fn running_job_work_bubble_clears_when_job_settles() {
+        let mut app = app();
+        let job_id = JobId::new("demo-cron");
+        app.ensure_job(&job_id, JobKind::Cron);
+
+        app.apply_job_status(&job_id, AgentStatus::Running);
+        assert!(app.bubbles.iter().any(|bubble| {
+            matches!(bubble.kind, crate::scene::BubbleKind::Work)
+                && bubble.text == "working on demo-cron"
+        }));
+
+        app.apply_job_status(&job_id, AgentStatus::Ok);
+        assert!(!app.bubbles.iter().any(|bubble| {
+            matches!(bubble.kind, crate::scene::BubbleKind::Work)
+                && bubble.text == "working on demo-cron"
+        }));
     }
 }
 
