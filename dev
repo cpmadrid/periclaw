@@ -20,6 +20,7 @@ USAGE:
 
 ACTIVITIES:
     run (r)                  Build and run the app (default mode: auto)
+    demo-smoke               Launch demo mode with visual-QA checkpoints
     build (b)                Build a binary
     test (t)                 Run cargo tests
     check (c)                cargo check --all-targets (fast, no codegen)
@@ -66,6 +67,7 @@ EXAMPLES:
     ./dev run --log file --log-level trace  # capture verbose trace to file
     ./dev run --log-file /tmp/ws.log --log both
     ./dev run --release                     # release build + run
+    ./dev demo-smoke                        # demo visual-QA checklist + run
     ./dev build --release                   # stripped release binary
     ./dev test                              # cargo test
     ./dev ci                                # everything CI runs
@@ -156,6 +158,9 @@ export BUILD_TYPE MODE NO_BUILD CLEAN LOG_TARGETS LOG_LEVEL LOG_FILE
 case "$ACTIVITY" in
     run|r)
         "${DEV_SCRIPT_DIR}/Scripts/run.sh"
+        ;;
+    demo-smoke)
+        "${DEV_SCRIPT_DIR}/Scripts/demo-smoke.sh"
         ;;
     build|b)
         "${DEV_SCRIPT_DIR}/Scripts/build.sh"

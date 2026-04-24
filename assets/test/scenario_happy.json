@@ -48,7 +48,7 @@
       "main": { "id": "main", "model": "vllm/qwen3-14b", "state": "idle" }
     },
     {
-      "at_ms": 18000,
+      "at_ms": 20000,
       "crons": [
         { "name": "zpool-health-check",           "state": { "lastStatus": "ok",    "running": true  } },
         { "name": "openclaw-auto-update",         "state": { "lastStatus": "ok",    "running": false } },
