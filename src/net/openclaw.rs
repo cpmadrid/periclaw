@@ -85,6 +85,7 @@ const CHANNEL_HEARTBEAT: Duration = Duration::from_secs(30);
 const LOG_TAIL_INTERVAL: Duration = Duration::from_secs(3);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+const ASSISTANT_RENDER_DEDUPE_WINDOW: Duration = Duration::from_secs(3);
 /// Wait while the operator approves a pending scope-upgrade
 /// pair-request. The gateway mints a fresh requestId on every
 /// reconnect attempt — if we retry on a short cycle the id shown
@@ -117,6 +118,13 @@ fn chrono_now_ms() -> i64 {
 /// from it. When the desktop grows a multi-agent roster this should
 /// route by the event's `sessionKey` instead.
 const CHAT_AGENT_ID: &str = "main";
+
+#[derive(Debug, Clone)]
+struct RecentAssistantRender {
+    session_key: String,
+    token: String,
+    at: std::time::Instant,
+}
 
 /// Stable, hashable bundle that [`connect`] takes as its subscription
 /// input. Its `Hash` impl contributes to the subscription identity,
@@ -710,6 +718,13 @@ async fn session(
     // on a long session.
     let mut seen_message_ids: std::collections::VecDeque<String> =
         std::collections::VecDeque::with_capacity(32);
+    // Cross-stream dedupe for assistant-visible turns. Some gateway
+    // builds surface internal replies via `chat final`, others via
+    // `session.message`, and transitional builds may emit both. Keep
+    // a short-lived `(sessionKey, text)` cache so the office scene
+    // doesn't double-render the same assistant turn.
+    let mut seen_assistant_renders: std::collections::VecDeque<RecentAssistantRender> =
+        std::collections::VecDeque::with_capacity(16);
 
     // In-flight `chat.history` RPC ids → agent ids. chat.history's
     // response payload doesn't echo the sessionKey, so we remember
@@ -766,6 +781,7 @@ async fn session(
                             out,
                             &mut cron_id_to_name,
                             &mut seen_message_ids,
+                            &mut seen_assistant_renders,
                             &mut log_cursor,
                             &mut pending_history,
                             &mut pending_session_history,
@@ -1038,6 +1054,7 @@ async fn handle_frame(
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
     cron_id_to_name: &mut std::collections::HashMap<String, String>,
     seen_message_ids: &mut std::collections::VecDeque<String>,
+    seen_assistant_renders: &mut std::collections::VecDeque<RecentAssistantRender>,
     log_cursor: &mut Option<i64>,
     pending_history: &mut std::collections::HashMap<String, String>,
     pending_session_history: &mut std::collections::HashMap<String, String>,
@@ -1198,7 +1215,15 @@ async fn handle_frame(
         Some("event") => {
             let event = frame.get("event").and_then(Value::as_str).unwrap_or("?");
             let payload = frame.get("payload");
-            handle_event(event, payload, out, cron_id_to_name, seen_message_ids).await?;
+            handle_event(
+                event,
+                payload,
+                out,
+                cron_id_to_name,
+                seen_message_ids,
+                seen_assistant_renders,
+            )
+            .await?;
         }
         other => {
             tracing::trace!(?other, raw = %txt, "unknown frame type");
@@ -1214,6 +1239,7 @@ async fn handle_event(
     out: &mut iced::futures::channel::mpsc::Sender<WsEvent>,
     cron_id_to_name: &std::collections::HashMap<String, String>,
     seen_message_ids: &mut std::collections::VecDeque<String>,
+    seen_assistant_renders: &mut std::collections::VecDeque<RecentAssistantRender>,
 ) -> Result<(), SessionError> {
     match event {
         // Scope-free: push delta for a single cron job.
@@ -1252,16 +1278,63 @@ async fn handle_event(
             // job set drifts from the static roster.
         }
 
-        // Scope-free `chat` event. We *could* render bubbles from this
-        // stream too, but `session.message` (scoped, below) covers both
-        // internal and external channels — handling both causes
-        // duplicate bubbles on the internal-channel path. Keep this as
-        // a trace-level observation of agent delta streaming.
+        // Scope-free `chat` event. Current gateway builds use this as
+        // the visible assistant-text path for internal Control-UI
+        // turns, while external-channel runs still surface via
+        // `session.message` below. We only render the settled
+        // `state:"final"` event here; deltas stay unrendered.
         "chat" => {
-            tracing::trace!(
-                ?payload,
-                "chat event (not rendered — using session.message)"
+            let Some(payload) = payload else {
+                return Ok(());
+            };
+            if let Some(info) = try_session_info(payload) {
+                let _ = out.send(WsEvent::SessionUsage(info)).await;
+            }
+            let Some(parsed) = try_chat_final(payload) else {
+                tracing::trace!(?payload, "chat event (delta/error/not rendered)");
+                return Ok(());
+            };
+            let session_key = parsed.session_key.as_str();
+            let agent_id = AgentId::new(
+                agent_id_from_session_key(session_key)
+                    .unwrap_or(CHAT_AGENT_ID)
+                    .to_string(),
             );
+            match parsed.outcome {
+                ChatFinalOutcome::Assistant(text) => {
+                    if note_recent_assistant_render(
+                        seen_assistant_renders,
+                        session_key,
+                        text.trim(),
+                    ) {
+                        tracing::debug!(session_key, "chat final duplicate skipped",);
+                        return Ok(());
+                    }
+                    tracing::debug!(
+                        agent = %agent_id.as_str(),
+                        session_key,
+                        len = text.len(),
+                        "chat final assistant",
+                    );
+                    let _ = out.send(WsEvent::AgentMessage { agent_id, text }).await;
+                }
+                ChatFinalOutcome::Silent => {
+                    if note_recent_assistant_render(
+                        seen_assistant_renders,
+                        session_key,
+                        "__silent__",
+                    ) {
+                        tracing::debug!(session_key, "chat final silent duplicate skipped",);
+                        return Ok(());
+                    }
+                    tracing::debug!(
+                        agent = %agent_id.as_str(),
+                        session_key,
+                        "chat final silent turn",
+                    );
+                    let _ = out.send(WsEvent::AgentSilentTurn { agent_id }).await;
+                }
+            }
         }
 
         // Scope-free: agent run stream (tool-call phases, lifecycle).
@@ -1308,6 +1381,11 @@ async fn handle_event(
 
         // Scoped (requires operator.read): session set changed.
         "sessions.changed" => {
+            if let Some(payload) = payload
+                && let Some(info) = try_session_info(payload)
+            {
+                let _ = out.send(WsEvent::SessionUsage(info)).await;
+            }
             let _ = out.send(WsEvent::SessionsChanged).await;
         }
 
@@ -1406,6 +1484,14 @@ async fn handle_event(
             // raw assistant content. Strip / detect it client-side
             // so it doesn't render as a bubble or log entry.
             if is_silent_reply(&text) {
+                if note_recent_assistant_render(seen_assistant_renders, session_key, "__silent__") {
+                    tracing::debug!(
+                        agent = %agent_id_str,
+                        session_key,
+                        "session.message silent duplicate skipped",
+                    );
+                    return Ok(());
+                }
                 tracing::debug!(
                     agent = %agent_id_str,
                     "session.message silent-reply sentinel — skipping render",
@@ -1415,6 +1501,14 @@ async fn handle_event(
                         agent_id: AgentId::new(agent_id_str),
                     })
                     .await;
+                return Ok(());
+            }
+            if note_recent_assistant_render(seen_assistant_renders, session_key, text.trim()) {
+                tracing::debug!(
+                    agent = %agent_id_str,
+                    session_key,
+                    "session.message duplicate skipped",
+                );
                 return Ok(());
             }
             tracing::debug!(
@@ -1564,6 +1658,74 @@ fn extract_message_text(payload: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatFinalOutcome {
+    Assistant(String),
+    Silent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatFinalEvent {
+    session_key: String,
+    outcome: ChatFinalOutcome,
+}
+
+fn try_chat_final(payload: &Value) -> Option<ChatFinalEvent> {
+    let state = payload.get("state").and_then(Value::as_str)?;
+    if state != "final" {
+        return None;
+    }
+    let session_key = payload
+        .get("sessionKey")
+        .and_then(Value::as_str)?
+        .to_string();
+    if session_key.is_empty() {
+        return None;
+    }
+    let text = payload
+        .get("message")
+        .and_then(flatten_message_content)
+        .unwrap_or_default();
+    let outcome = if text.trim().is_empty() || is_silent_reply(&text) {
+        ChatFinalOutcome::Silent
+    } else {
+        ChatFinalOutcome::Assistant(text)
+    };
+    Some(ChatFinalEvent {
+        session_key,
+        outcome,
+    })
+}
+
+fn note_recent_assistant_render(
+    seen: &mut std::collections::VecDeque<RecentAssistantRender>,
+    session_key: &str,
+    token: &str,
+) -> bool {
+    let now = std::time::Instant::now();
+    while seen
+        .front()
+        .is_some_and(|entry| now.duration_since(entry.at) > ASSISTANT_RENDER_DEDUPE_WINDOW)
+    {
+        seen.pop_front();
+    }
+    if seen
+        .iter()
+        .any(|entry| entry.session_key == session_key && entry.token == token)
+    {
+        return true;
+    }
+    if seen.len() >= 16 {
+        seen.pop_front();
+    }
+    seen.push_back(RecentAssistantRender {
+        session_key: session_key.to_string(),
+        token: token.to_string(),
+        at: now,
+    });
+    false
 }
 
 fn try_cron_list(v: &Value) -> Option<Vec<CronJob>> {
@@ -1731,6 +1893,11 @@ fn try_chat_history(v: &Value) -> Option<Vec<crate::ui::chat_view::ChatMessage>>
     Some(history)
 }
 
+fn try_session_info(v: &Value) -> Option<SessionInfo> {
+    let info: SessionInfo = serde_json::from_value(v.clone()).ok()?;
+    (!info.key.is_empty()).then_some(info)
+}
+
 /// Pull the text out of a chat-history entry. OpenClaw's
 /// `chat.history` returns a union shape — either `content: "..."` or
 /// `content: [{type: "text", text: "..."}, ...]` (or the legacy
@@ -1872,6 +2039,82 @@ mod command_rpc_tests {
         assert_eq!(agent_id_from_session_key("main"), None);
         assert_eq!(agent_id_from_session_key("agent::main"), None);
         assert_eq!(agent_id_from_session_key("agent:onlyid"), None);
+    }
+
+    #[test]
+    fn chat_final_with_text_maps_to_assistant_message() {
+        let payload = json!({
+            "sessionKey": "agent:main:main",
+            "state": "final",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "WS_SMOKE" }]
+            }
+        });
+        let parsed = try_chat_final(&payload).expect("chat final should parse");
+        assert_eq!(parsed.session_key, "agent:main:main");
+        assert_eq!(
+            parsed.outcome,
+            ChatFinalOutcome::Assistant("WS_SMOKE".to_string()),
+        );
+    }
+
+    #[test]
+    fn chat_final_without_message_maps_to_silent_turn() {
+        let payload = json!({
+            "sessionKey": "agent:main:main",
+            "state": "final"
+        });
+        let parsed = try_chat_final(&payload).expect("silent chat final should parse");
+        assert_eq!(parsed.session_key, "agent:main:main");
+        assert_eq!(parsed.outcome, ChatFinalOutcome::Silent);
+    }
+
+    #[test]
+    fn chat_final_silent_token_maps_to_silent_turn() {
+        let payload = json!({
+            "sessionKey": "agent:main:main",
+            "state": "final",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "NO_REPLY" }]
+            }
+        });
+        let parsed = try_chat_final(&payload).expect("silent token should parse");
+        assert_eq!(parsed.outcome, ChatFinalOutcome::Silent);
+    }
+
+    #[test]
+    fn session_info_parser_accepts_event_aliases() {
+        let payload = json!({
+            "sessionKey": "agent:main:main",
+            "totalTokens": 42,
+            "contextTokens": 11
+        });
+        let info = try_session_info(&payload).expect("session info should parse");
+        assert_eq!(info.key, "agent:main:main");
+        assert_eq!(info.total_tokens, Some(42));
+        assert_eq!(info.context_tokens, Some(11));
+    }
+
+    #[test]
+    fn assistant_render_dedupe_is_session_scoped() {
+        let mut seen = std::collections::VecDeque::new();
+        assert!(!note_recent_assistant_render(
+            &mut seen,
+            "agent:main:main",
+            "same text",
+        ));
+        assert!(note_recent_assistant_render(
+            &mut seen,
+            "agent:main:main",
+            "same text",
+        ));
+        assert!(!note_recent_assistant_render(
+            &mut seen,
+            "agent:main:other",
+            "same text",
+        ));
     }
 
     #[test]

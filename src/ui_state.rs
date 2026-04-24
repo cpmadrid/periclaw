@@ -80,8 +80,8 @@ pub struct Settings {
     /// shows a first-run banner asking the user to configure one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_url: Option<String>,
-    /// `"auto"`, `"ws"`, or `"mock"`. Honored when `OPENCLAW_MOCK` is
-    /// unset in the environment — if the env var is set, it wins.
+    /// `"auto"`, `"ws"`, or `"demo"`. Legacy persisted `"mock"` values
+    /// are normalized to `"demo"` by the app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
 }

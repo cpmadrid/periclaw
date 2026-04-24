@@ -4,7 +4,7 @@
 
 # PeriClaw
 
-Native Rust desktop app — a pixel-art "Agent Office" visualization of an OpenClaw AI agent farm. Octopus sprites in themed rooms, thought bubbles on state transitions, a real-time WebSocket connection to the OpenClaw gateway.
+Native Rust desktop app — a pixel-art "Agent Office" visualization of an OpenClaw AI agent farm. Lobster sprites in themed rooms, thought bubbles on state transitions, and a real-time WebSocket connection to the OpenClaw gateway.
 
 > **Status:** in active personal use. Live WebSocket connection with Ed25519 device pairing, pixel-art office scene with sprite animations, multi-agent chat, Agents / Sessions / Logs nav tabs, approval flow, operator-driven cron runs and session resets. Persistent UI state across restarts.
 
@@ -19,7 +19,7 @@ Native Rust desktop app — a pixel-art "Agent Office" visualization of an OpenC
 
 ```bash
 ./dev run                        # auto mode, debug build (uses env vars as-is)
-./dev run --mode mock            # scripted fixture (offline, no gateway needed)
+./dev run --mode demo            # scripted fixture (offline, no gateway needed)
 ./dev run --mode ws              # real data via native WebSocket
 ./dev run --release              # release-optimized
 ./dev build --release            # stripped release binary at target/release/periclaw
@@ -40,10 +40,12 @@ Two paths to OpenClaw state, selected via `./dev run --mode`:
 
 | Mode | Env vars | Data source | Use case |
 |---|---|---|---|
-| `mock` | `OPENCLAW_MOCK=1` (auto-set) | `assets/test/scenario_happy.json` | Offline demo, UI iteration — no gateway required |
+| `demo` | `PERICLAW_MODE=demo` + `PERICLAW_DEMO=1` (auto-set) | `assets/test/scenario_happy.json` | Offline demo, UI iteration — no gateway required |
 | `ws` | `OPENCLAW_GATEWAY_URL` (required), `OPENCLAW_TOKEN` (optional) | Native WebSocket to the gateway | Full push-event stream; Ed25519 device pairing handled automatically — first run files a pair-request the operator approves with `openclaw devices approve <id>`. |
 
-`auto` (the default when `--mode` is omitted) picks `mock` if `OPENCLAW_MOCK` is already set in the environment, otherwise `ws`. The selector lives in `app::App::subscription`.
+`--mode demo` and `--mode ws` set `PERICLAW_MODE`, which overrides the persisted Settings-tab mode for that launch. `auto` (the default when `--mode` is omitted) picks `demo` if `PERICLAW_DEMO` is already set in the environment, otherwise `ws`. The legacy `OPENCLAW_MOCK` env var and `--mode mock` CLI alias are still accepted for older local scripts. The selector lives in `app::App::subscription`.
+
+The demo loop intentionally covers three UI signal paths every cycle: background job work that bubbles on and off, a visible tool/message turn, and a silent lifecycle turn where the power-up shows without a thought bubble.
 
 ## Build for release
 
@@ -66,14 +68,14 @@ src/
 ├── logs.rs             # Severity classification + log buffer for the Logs tab
 ├── domain/             # Agent, status, room assignment
 ├── scene/              # Canvas program, sprite atlas, thought bubbles
-├── net/                # WS client (openclaw.rs), commands, events, rpc types, mock
+├── net/                # WS client (openclaw.rs), commands, events, rpc types, demo
 └── ui/                 # Per-tab views, shared widgets (chat_bubble, chat_input,
                         # sidebar, status_bar, approvals) and OKLCH theme
 ```
 
 ## Configuration
 
-**Gateway URL**: set `OPENCLAW_GATEWAY_URL` to a `ws://` or `wss://` endpoint. There is no default — if the var is unset and `--mode mock` is not selected, the app surfaces an error and stays disconnected.
+**Gateway URL**: set `OPENCLAW_GATEWAY_URL` to a `ws://` or `wss://` endpoint. There is no default — if the var is unset and `--mode demo` is not selected, the app surfaces an error and stays disconnected.
 
 The WebSocket handshake sends an `Origin` header derived from the gateway URL's scheme and host (`wss://host/...` → `https://host`). The gateway's `controlUi.allowedOrigins` setting must include this origin, or the upgrade will be rejected.
 

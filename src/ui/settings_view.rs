@@ -1,7 +1,7 @@
 //! The "Settings" nav tab — connection configuration + (masked)
 //! token management. This is also the first-run entry point: if no
 //! gateway URL has ever been configured and the operator isn't in
-//! mock mode, `App::new` force-selects this tab and we render a
+//! Demo mode, `App::new` force-selects this tab and we render a
 //! banner explaining what's needed.
 //!
 //! ## What lives here vs. elsewhere
@@ -25,7 +25,8 @@ use iced::{Alignment, Border, Element, Length, Padding};
 
 use crate::Message;
 use crate::app::{ConnectionStatus, SettingsForm};
-use crate::domain::{Agent, AgentId, Room};
+use crate::domain::job::JobKind;
+use crate::domain::{Agent, AgentId, Job, JobId, Room};
 use crate::ui::theme;
 use crate::ui::widgets::card_style;
 use crate::ui_state::Settings;
@@ -33,7 +34,7 @@ use crate::ui_state::Settings;
 pub struct Snapshot<'a> {
     pub settings: &'a Settings,
     pub form: &'a SettingsForm,
-    /// `true` when no URL is configured (persisted, env, or mock
+    /// `true` when no URL is configured (persisted, env, or Demo
     /// opted into). Drives the "first-run required" banner and the
     /// emphasis on the URL field.
     pub first_run_incomplete: bool,
@@ -54,6 +55,10 @@ pub struct Snapshot<'a> {
     /// per agent with a `pick_list` of room labels.
     pub roster: &'a [Agent],
     pub agent_rooms: &'a HashMap<AgentId, String>,
+    /// Current cron/channel jobs and their per-job room overrides.
+    /// Used to decide which room lights up while a job is running.
+    pub jobs: &'a HashMap<JobId, Job>,
+    pub job_rooms: &'a HashMap<JobId, String>,
 }
 
 pub fn view<'a>(snap: Snapshot<'a>) -> Element<'a, Message> {
@@ -91,6 +96,7 @@ pub fn view<'a>(snap: Snapshot<'a>) -> Element<'a, Message> {
         snap.rooms,
         snap.agent_rooms,
     ));
+    body = body.push(job_rooms_section(snap.jobs, snap.rooms, snap.job_rooms));
     body = body.push(footer_hint(snap.settings));
 
     container(body).width(Length::Fill).into()
@@ -164,13 +170,7 @@ fn agent_rooms_section<'a>(
     // `pick_list` values must be Clone + Eq + Display. RoomOption
     // wraps (id, label) so the display string is the human label
     // while the stable id is what we dispatch.
-    let options: Vec<RoomOption> = rooms
-        .iter()
-        .map(|r| RoomOption {
-            id: r.id.clone(),
-            label: r.label.clone(),
-        })
-        .collect();
+    let options = room_options(rooms);
 
     let row_iter = roster.iter().map(|agent| {
         let current_id = agent_rooms
@@ -227,6 +227,97 @@ fn agent_rooms_section<'a>(
         .into()
 }
 
+fn job_rooms_section<'a>(
+    jobs: &'a HashMap<JobId, Job>,
+    rooms: &'a [Room],
+    job_rooms: &'a HashMap<JobId, String>,
+) -> Element<'a, Message> {
+    let options = room_options(rooms);
+
+    let mut sorted_jobs: Vec<&Job> = jobs.values().collect();
+    sorted_jobs.sort_by(|a, b| {
+        job_kind_label(a.kind)
+            .cmp(job_kind_label(b.kind))
+            .then_with(|| a.display.cmp(&b.display))
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
+
+    let row_iter = sorted_jobs.into_iter().map(|job| {
+        let current_id = job_rooms
+            .get(&job.id)
+            .cloned()
+            .unwrap_or_else(|| crate::domain::room::MAIN_ROOM.to_string());
+        let selected = options.iter().find(|o| o.id == current_id).cloned();
+        let job_id = job.id.clone();
+        let pl = pick_list(options.clone(), selected, move |opt: RoomOption| {
+            Message::JobHomeRoomChanged(job_id.clone(), opt.id)
+        })
+        .placeholder("choose room")
+        .padding(Padding::from([4, 8]))
+        .text_size(12);
+        row![
+            column![
+                text(job.display.as_str())
+                    .size(13)
+                    .color(*theme::FOREGROUND),
+                text(job_kind_label(job.kind)).size(11).color(*theme::MUTED),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            pl,
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+    });
+
+    let list: iced::widget::Column<'a, Message> = row_iter
+        .fold(column![].spacing(6), |acc, el: Element<'a, Message>| {
+            acc.push(el)
+        });
+
+    let body = if jobs.is_empty() {
+        column![
+            text("Jobs").size(13).color(*theme::FOREGROUND),
+            text("No cron or channel jobs discovered yet.")
+                .size(11)
+                .color(*theme::MUTED),
+        ]
+        .spacing(8)
+    } else {
+        column![
+            text("Jobs").size(13).color(*theme::FOREGROUND),
+            text("Pick which room lights up when each job is running.")
+                .size(11)
+                .color(*theme::MUTED),
+            list,
+        ]
+        .spacing(8)
+    };
+
+    container(body)
+        .padding(Padding::from([12, 14]))
+        .style(card_style(6.0))
+        .into()
+}
+
+fn room_options(rooms: &[Room]) -> Vec<RoomOption> {
+    rooms
+        .iter()
+        .map(|r| RoomOption {
+            id: r.id.clone(),
+            label: r.label.clone(),
+        })
+        .collect()
+}
+
+fn job_kind_label(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Cron => "cron",
+        JobKind::Channel => "channel",
+    }
+}
+
 /// Display wrapper for the agent-room `pick_list`. `Display` returns
 /// the human label; equality is by stable room id so reordering or
 /// renaming doesn't break selection matching.
@@ -258,7 +349,7 @@ fn first_run_banner<'a>() -> Element<'a, Message> {
         text(
             "Enter your OpenClaw gateway WebSocket URL below and click Save. \
              Tokens are optional — Tailscale-authenticated gateways don't need \
-             one. Run with OPENCLAW_MOCK=1 to preview without connecting.",
+             one. Run with PERICLAW_DEMO=1 to preview without connecting.",
         )
         .size(12)
         .color(*theme::MUTED),
@@ -341,15 +432,15 @@ fn mode_section<'a>(form: &'a SettingsForm) -> Element<'a, Message> {
     column![
         text("Mode").size(13).color(*theme::FOREGROUND),
         text(
-            "Auto picks mock when OPENCLAW_MOCK=1 is set, otherwise live WS. \
-             Explicit Mock runs the offline fixture; WS forces a gateway connection.",
+            "Auto picks Demo when PERICLAW_DEMO=1 is set, otherwise live WS. \
+             ./dev run --mode overrides this setting for that launch.",
         )
         .size(11)
         .color(*theme::MUTED),
         row![
             choice("Auto", "auto"),
             choice("Live WS", "ws"),
-            choice("Mock (offline)", "mock"),
+            choice("Demo (offline)", "demo"),
         ]
         .spacing(18),
     ]

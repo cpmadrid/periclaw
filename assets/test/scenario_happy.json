@@ -1,5 +1,5 @@
 {
-  "description": "Happy-path demo loop — crons cycle through idle → running → ok, one channel errors briefly, main stays idle. Used by OPENCLAW_MOCK=1.",
+  "description": "Demo loop — background jobs cycle on and off, one channel errors briefly, and the main agent stays idle here because chat/tool/silent/error turns are scripted separately by Demo mode.",
   "loop_seconds": 30,
   "ticks": [
     {
@@ -30,7 +30,7 @@
         { "name": "telegram", "enabled": true, "connected": true },
         { "name": "whatsapp", "enabled": false, "connected": false }
       ],
-      "main": { "id": "main", "model": "vllm/qwen3-14b", "state": "running" }
+      "main": { "id": "main", "model": "vllm/qwen3-14b", "state": "idle" }
     },
     {
       "at_ms": 10000,

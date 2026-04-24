@@ -1,4 +1,4 @@
-//! Events pushed from the WS stream (real or mock) into the Iced app.
+//! Events pushed from the WS stream (real or Demo) into the Iced app.
 //!
 //! These are the domain-flavored events the UI actually cares about —
 //! richer than raw RPC responses, simpler than the whole OpenClaw API.

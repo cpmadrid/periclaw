@@ -32,8 +32,8 @@ ACTIVITIES:
     help (h, -h, --help)     Show this help
 
 RUN OPTIONS:
-    --mode <mock|ws|auto>    Data source. Default: auto (use env vars as-is)
-                               mock — scripted fixture (no network)
+    --mode <demo|ws|auto>    Data source. Default: auto (use env vars as-is)
+                               demo — scripted fixture (no network)
                                ws   — native WS push stream (default)
     --release, -r            Release build
     --no-build               Skip cargo build; exec the pre-built binary
@@ -61,7 +61,7 @@ GENERAL:
 
 EXAMPLES:
     ./dev run                               # auto mode, debug, console logs
-    ./dev run --mode mock                   # scripted fixture
+    ./dev run --mode demo                   # scripted fixture
     ./dev run --log both                    # tee logs to console + file
     ./dev run --log file --log-level trace  # capture verbose trace to file
     ./dev run --log-file /tmp/ws.log --log both
