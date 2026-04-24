@@ -1,0 +1,4 @@
+interface:
+  display_name: "PeriClaw Send It"
+  short_description: "Ship PeriClaw PRs end to end"
+  default_prompt: "Use $periclaw-send-it to run the PeriClaw PR flow for the current branch."
