@@ -1998,6 +1998,12 @@ impl App {
         if prev == Some(next) {
             return;
         }
+        tracing::debug!(
+            agent = %id.as_str(),
+            ?prev,
+            ?next,
+            "agent status update",
+        );
         self.statuses.insert(id.clone(), next);
         self.transition_moments.insert(id.clone(), Instant::now());
         if let Some(text) = transition_text(prev, next) {
@@ -2015,6 +2021,12 @@ impl App {
         if prev == Some(next) {
             return;
         }
+        tracing::debug!(
+            agent = %id.as_str(),
+            ?prev,
+            ?next,
+            "agent status update silent",
+        );
         self.statuses.insert(id.clone(), next);
         self.transition_moments.insert(id, Instant::now());
     }

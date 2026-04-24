@@ -34,6 +34,12 @@ const MAIN_AGENT_ID: &str = "main";
 const MAIN_SESSION_KEY: &str = "agent:main:main";
 const DIGEST_SESSION_KEY: &str = "agent:main:weekly-digest";
 
+const VISIBLE_MESSAGE_AT_MS: u64 = 5_300;
+const SILENT_INBOUND_AT_MS: u64 = 14_200;
+const SILENT_THINKING_AT_MS: u64 = 14_900;
+const SILENT_DONE_AT_MS: u64 = 19_000;
+const SILENT_IDLE_AT_MS: u64 = 19_400;
+
 #[derive(Debug, Deserialize)]
 struct Scenario {
     loop_seconds: u64,
@@ -111,6 +117,11 @@ pub fn connect() -> impl Stream<Item = WsEvent> {
                     if scripted.at_ms != next_ms {
                         break;
                     }
+                    tracing::debug!(
+                        at_ms = scripted.at_ms,
+                        event = ?scripted.event,
+                        "demo scripted event",
+                    );
                     let _ = out.send(scripted.event.clone()).await;
                     event_idx += 1;
                 }
@@ -360,7 +371,7 @@ fn loop_events() -> Vec<TimedDemoEvent> {
             },
         ),
         event_at(
-            5_300,
+            VISIBLE_MESSAGE_AT_MS,
             WsEvent::AgentMessage {
                 agent_id: main.clone(),
                 text: "Demo check complete: Slack and Telegram are connected; WhatsApp is intentionally disabled.".to_string(),
@@ -373,23 +384,30 @@ fn loop_events() -> Vec<TimedDemoEvent> {
                 kind: ActivityKind::Idle,
             },
         ),
-        // Silent run: sparkle only, no reply bubble.
+        // Silent run: sparkle only, no reply bubble. Starts after
+        // the visible-turn message bubble has expired so the sparkle
+        // gets a clean, deterministic window in demo smoke checks.
         event_at(
-            13_000,
+            SILENT_INBOUND_AT_MS,
             WsEvent::AgentInboundUserMessage {
                 agent_id: main.clone(),
             },
         ),
         event_at(
-            13_700,
+            SILENT_THINKING_AT_MS,
             WsEvent::AgentActivity {
                 agent_id: main.clone(),
                 kind: ActivityKind::Thinking,
             },
         ),
-        event_at(15_600, WsEvent::AgentSilentTurn { agent_id: main.clone() }),
         event_at(
-            16_000,
+            SILENT_DONE_AT_MS,
+            WsEvent::AgentSilentTurn {
+                agent_id: main.clone(),
+            },
+        ),
+        event_at(
+            SILENT_IDLE_AT_MS,
             WsEvent::AgentActivity {
                 agent_id: main.clone(),
                 kind: ActivityKind::Idle,
@@ -541,6 +559,56 @@ mod tests {
             events.windows(2).all(|w| w[0].at_ms <= w[1].at_ms),
             "Demo events must stay sorted for scheduler ordering",
         );
+    }
+
+    #[test]
+    fn silent_run_has_clear_sparkle_window_after_visible_bubbles_expire() {
+        let message_ttl_ms = u64::try_from(crate::scene::thought_bubble::MESSAGE_TTL.as_millis())
+            .expect("message TTL fits in demo milliseconds");
+        let previous_message_expires_at = VISIBLE_MESSAGE_AT_MS + message_ttl_ms;
+
+        assert!(
+            SILENT_INBOUND_AT_MS >= previous_message_expires_at + 500,
+            "silent run should start after the visible message bubble expires"
+        );
+
+        let events = loop_events();
+        let silent_done_idx = events
+            .iter()
+            .position(|evt| matches!(&evt.event, WsEvent::AgentSilentTurn { .. }))
+            .expect("silent run has a done marker");
+        let silent_start_at = events[..silent_done_idx]
+            .iter()
+            .rev()
+            .find_map(|evt| {
+                matches!(&evt.event, WsEvent::AgentInboundUserMessage { .. }).then_some(evt.at_ms)
+            })
+            .expect("silent run has an inbound marker");
+        let silent_done_at = events[silent_done_idx].at_ms;
+        assert!(
+            silent_done_at - silent_start_at >= 4_000,
+            "silent run should leave the sparkle visible long enough for visual QA"
+        );
+
+        let scenario: Scenario = serde_json::from_str(FIXTURE).expect("demo fixture parses");
+        let next_tick = scenario
+            .ticks
+            .iter()
+            .find(|tick| tick.at_ms >= SILENT_INBOUND_AT_MS)
+            .expect("fixture has a tick after silent run starts");
+        assert!(
+            next_tick.at_ms >= SILENT_IDLE_AT_MS,
+            "fixture ticks should not overwrite the silent Running status while QA is watching"
+        );
+
+        assert!(events.iter().any(|evt| matches!(
+            &evt.event,
+            WsEvent::AgentInboundUserMessage { .. } if evt.at_ms == SILENT_INBOUND_AT_MS
+        )));
+        assert!(events.iter().any(|evt| matches!(
+            &evt.event,
+            WsEvent::AgentSilentTurn { .. } if evt.at_ms == SILENT_DONE_AT_MS
+        )));
     }
 
     #[test]

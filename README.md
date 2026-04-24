@@ -20,6 +20,7 @@ Native Rust desktop app — a pixel-art "Agent Office" visualization of an OpenC
 ```bash
 ./dev run                        # auto mode, debug build (uses env vars as-is)
 ./dev run --mode demo            # scripted fixture (offline, no gateway needed)
+./dev demo-smoke                 # demo visual-QA checklist + scripted fixture
 ./dev run --mode ws              # real data via native WebSocket
 ./dev run --release              # release-optimized
 ./dev build --release            # stripped release binary at target/release/periclaw
@@ -45,7 +46,7 @@ Two paths to OpenClaw state, selected via `./dev run --mode`:
 
 `--mode demo` and `--mode ws` set `PERICLAW_MODE`, which overrides the persisted Settings-tab mode for that launch. `auto` (the default when `--mode` is omitted) picks `demo` if `PERICLAW_DEMO` is already set in the environment, otherwise `ws`. The legacy `OPENCLAW_MOCK` env var and `--mode mock` CLI alias are still accepted for older local scripts. The selector lives in `app::App::subscription`.
 
-The demo loop intentionally covers three UI signal paths every cycle: background job work that bubbles on and off, a visible tool/message turn, and a silent lifecycle turn where the power-up shows without a thought bubble.
+The demo loop intentionally covers three UI signal paths every cycle: background job work that bubbles on and off, a visible tool/message turn, and a silent lifecycle turn where the power-up shows without a thought bubble. Use `./dev demo-smoke` for the repeatable visual pass; the silent sparkle window starts around 14s and runs without a competing bubble.
 
 ## Build for release
 
